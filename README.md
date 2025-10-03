@@ -8,6 +8,8 @@ Node.js application to fetch profiles from Oracle Commerce Cloud API.
 - Paginated profile search (250 at a time)
 - Automatic saving of all responses to JSON files
 - Support for different search fields (email, firstName, etc.)
+- **NEW**: Data mining from consolidated results with multiple filter types
+- Automatic CSV export for both search and mining results
 
 ## Installation
 
@@ -162,6 +164,41 @@ Each file contains:
 - Prevents overwriting files from multiple executions on the same day
 - Sequential execution numbering in parentheses
 - Each execution gets its own numbered sequence
+
+## Data Mining
+
+After consolidating search results, you can mine the data using various filter types:
+
+### Boolean Filters
+```bash
+./mine.sh profile_03-10-2025_consolidated.json --f=active true
+./mine.sh profile_03-10-2025_consolidated.json --f=isSubscribed false
+```
+
+### Date Range Filters
+```bash
+./mine.sh profile_03-10-2025_consolidated.json --f=registrationDate "2020-01-01 2023-12-31"
+./mine.sh profile_03-10-2025_consolidated.json --f=lastLoginDate "2024-01-01 2024-12-31"
+```
+
+### Numeric Filters
+```bash
+./mine.sh profile_03-10-2025_consolidated.json --f=lastPurchaseAmount ">100"
+./mine.sh profile_03-10-2025_consolidated.json --f=age ">=18"
+./mine.sh profile_03-10-2025_consolidated.json --f=loyaltyPoints "<1000"
+./mine.sh profile_03-10-2025_consolidated.json --f=totalOrders "=5"
+```
+
+### String Contains Filters
+```bash
+./mine.sh profile_03-10-2025_consolidated.json --f=firstName "Pedro"
+./mine.sh profile_03-10-2025_consolidated.json --f=email "gmail"
+./mine.sh profile_03-10-2025_consolidated.json --f=city "São Paulo"
+```
+
+### Mining Output
+- `profiles_datamined_YYYY-MM-DD-HH-MM-SS.json` - Filtered data with metadata
+- `profiles_datamined_YYYY-MM-DD-HH-MM-SS.csv` - CSV format for analysis
 
 ## Result Consolidation
 

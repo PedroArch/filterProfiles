@@ -224,6 +224,176 @@ class ProfileFetcher {
     }
   }
 
+  async mineData(inputFile, field, condition) {
+    const spinner = ora(chalk.blue('⛏️  Mining data...')).start();
+    
+    try {
+      // Check if input file exists
+      const inputPath = path.join(this.resultDir, inputFile);
+      if (!fs.existsSync(inputPath)) {
+        throw new Error(`Input file not found: ${inputFile}`);
+      }
+
+      // Load consolidated data
+      const data = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+      const items = data.items || [];
+
+      if (items.length === 0) {
+        spinner.warn(chalk.yellow('No items found in input file'));
+        return;
+      }
+
+      // Check if field exists in data
+      const hasField = items.some(item => item.hasOwnProperty(field));
+      if (!hasField) {
+        throw new Error(`Field '${field}' not found in any items. Available fields: ${Object.keys(items[0]).join(', ')}`);
+      }
+
+      // Parse condition and filter data
+      const filteredItems = this.filterItems(items, field, condition);
+
+      if (filteredItems.length === 0) {
+        spinner.warn(chalk.yellow(`No items match the condition: ${field} ${condition}`));
+        return;
+      }
+
+      // Create result object
+      const result = {
+        source: inputFile,
+        filter: `${field} ${condition}`,
+        originalCount: items.length,
+        filteredCount: filteredItems.length,
+        items: filteredItems
+      };
+
+      // Generate output filename
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+      const outputFilename = `profiles_datamined_${timestamp}.json`;
+      const outputPath = path.join(this.resultDir, outputFilename);
+
+      // Save filtered data
+      fs.writeFileSync(outputPath, JSON.stringify(result, null, 2));
+
+      // Generate CSV for mined data
+      await this.generateMinedCSV(result, timestamp);
+
+      spinner.succeed(chalk.green('Data mining completed successfully!'));
+      console.log(chalk.cyan(`📊 Original items: ${chalk.bold(items.length)}`));
+      console.log(chalk.cyan(`🎯 Filtered items: ${chalk.bold(filteredItems.length)}`));
+      console.log(chalk.cyan(`📄 JSON output: ${outputFilename}`));
+      console.log(chalk.cyan(`📊 CSV output: profiles_datamined_${timestamp}.csv\n`));
+
+    } catch (error) {
+      spinner.fail(chalk.red('❌ Error mining data:'));
+      console.error(error.message);
+      throw error;
+    }
+  }
+
+  filterItems(items, field, condition) {
+    return items.filter(item => {
+      const value = item[field];
+      
+      // Handle null/undefined values
+      if (value === null || value === undefined) {
+        return condition.toLowerCase() === 'null' || condition.toLowerCase() === 'undefined';
+      }
+
+      // Boolean conditions
+      if (condition.toLowerCase() === 'true' || condition.toLowerCase() === 'false') {
+        return String(value).toLowerCase() === condition.toLowerCase();
+      }
+
+      // Date range conditions (format: "startDate endDate")
+      if (condition.includes(' ') && condition.split(' ').length === 2) {
+        const [startDate, endDate] = condition.split(' ');
+        const itemDate = new Date(value);
+        const start = new Date(startDate);
+        const end = new Date(endDate);
+        
+        if (!isNaN(itemDate) && !isNaN(start) && !isNaN(end)) {
+          return itemDate >= start && itemDate <= end;
+        }
+      }
+
+      // Numeric conditions (>, <, =, >=, <=)
+      const numericMatch = condition.match(/^([><=]+)?\s*(-?\d+\.?\d*)$/);
+      if (numericMatch) {
+        const operator = numericMatch[1] || '=';
+        const conditionValue = parseFloat(numericMatch[2]);
+        const itemValue = parseFloat(value);
+        
+        if (!isNaN(itemValue)) {
+          switch (operator) {
+            case '>': return itemValue > conditionValue;
+            case '<': return itemValue < conditionValue;
+            case '>=': return itemValue >= conditionValue;
+            case '<=': return itemValue <= conditionValue;
+            case '=': 
+            default: return itemValue === conditionValue;
+          }
+        }
+      }
+
+      // String contains condition (default)
+      return String(value).toLowerCase().includes(condition.toLowerCase());
+    });
+  }
+
+  async generateMinedCSV(result, timestamp) {
+    try {
+      const items = result.items;
+      
+      if (items.length === 0) {
+        return;
+      }
+
+      // Get all unique fields from all items
+      const allFields = new Set();
+      items.forEach(item => {
+        Object.keys(item).forEach(key => allFields.add(key));
+      });
+      
+      const fields = Array.from(allFields).sort();
+      
+      // Create CSV header
+      let csvContent = fields.join(',') + '\n';
+      
+      // Add data rows
+      items.forEach(item => {
+        const row = fields.map(field => {
+          let value = item[field];
+          
+          if (value === null || value === undefined) {
+            return '';
+          }
+          
+          if (typeof value === 'object') {
+            value = JSON.stringify(value);
+          }
+          
+          value = String(value);
+          if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+            value = '"' + value.replace(/"/g, '""') + '"';
+          }
+          
+          return value;
+        });
+        
+        csvContent += row.join(',') + '\n';
+      });
+      
+      // Save CSV file
+      const csvFilename = `profiles_datamined_${timestamp}.csv`;
+      const csvFilepath = path.join(this.resultDir, csvFilename);
+      
+      fs.writeFileSync(csvFilepath, csvContent, 'utf8');
+      
+    } catch (error) {
+      console.error(chalk.red('Error generating mined CSV:'), error.message);
+    }
+  }
+
   isTokenExpired() {
     if (!this.tokenExpiresAt) return true;
     // Check if token expires in the next 30 seconds (buffer time)
@@ -424,6 +594,34 @@ program
       console.log(chalk.green.bold('\n🎉 Operation completed successfully!'));
     } catch (error) {
       console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('mineResult')
+  .description('Mine data from consolidated result files')
+  .option('--f <field>', 'Field to filter by')
+  .argument('<inputFile>', 'Input consolidated file (e.g: profile_03-10-2025_consolidated.json)')
+  .argument('[condition]', 'Filter condition')
+  .action(async (inputFile, condition, options) => {
+    try {
+      console.log(chalk.blue.bold('⛏️  Profile Data Miner v1.0.0\n'));
+      
+      if (!options.f) {
+        throw new Error('Field parameter --f is required (e.g: --f active)');
+      }
+
+      if (!condition) {
+        throw new Error('Condition is required (e.g: true, "2020-01-01 2021-01-01", ">20", "Pedro")');
+      }
+      
+      const fetcher = new ProfileFetcher('dev'); // Environment doesn't matter for mining
+      await fetcher.mineData(inputFile, options.f, condition);
+      
+      console.log(chalk.green.bold('🎉 Data mining completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('❌ Error:'), error.message);
       process.exit(1);
     }
   });
