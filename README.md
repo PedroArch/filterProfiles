@@ -167,38 +167,63 @@ Each file contains:
 
 ## Data Mining
 
-After consolidating search results, you can mine the data using various filter types:
+After consolidating search results, you can mine the data using various filter types.
 
-### Boolean Filters
+**🧠 Smart Type Detection**: The application automatically analyzes your data fields and detects:
+- **Boolean**: true/false values
+- **Number**: Integers and decimals (supports >, <, >=, <=, = operators)
+- **Date**: ISO dates and common formats (supports ranges)
+- **String**: Text values (contains search)
+
+### Usage Options:
 ```bash
-./mine.sh profile_03-10-2025_consolidated.json --f=active true
-./mine.sh profile_03-10-2025_consolidated.json --f=isSubscribed false
+# NPM command (recommended)
+npm run mine -- --f=fieldName inputFile.json "condition"
+
+# Direct command
+node index.js mineResult --f=fieldName inputFile.json "condition"
+
+# Shell script
+./mine.sh inputFile.json --f=fieldName "condition"
 ```
 
-### Date Range Filters
+### Boolean Filters (auto-detected)
 ```bash
-./mine.sh profile_03-10-2025_consolidated.json --f=registrationDate "2020-01-01 2023-12-31"
-./mine.sh profile_03-10-2025_consolidated.json --f=lastLoginDate "2024-01-01 2024-12-31"
+npm run mine -- --f=active profile_consolidated.json "true"
+npm run mine -- --f=isSubscribed profile_consolidated.json "false"
 ```
 
-### Numeric Filters
+### Date Range Filters (auto-detected)
 ```bash
-./mine.sh profile_03-10-2025_consolidated.json --f=lastPurchaseAmount ">100"
-./mine.sh profile_03-10-2025_consolidated.json --f=age ">=18"
-./mine.sh profile_03-10-2025_consolidated.json --f=loyaltyPoints "<1000"
-./mine.sh profile_03-10-2025_consolidated.json --f=totalOrders "=5"
+npm run mine -- --f=registrationDate profile_consolidated.json "2020-01-01 2023-12-31"
+npm run mine -- --f=lastLoginDate profile_consolidated.json "2024-01-01 2024-12-31"
 ```
 
-### String Contains Filters
+### Numeric Filters (auto-detected)
 ```bash
-./mine.sh profile_03-10-2025_consolidated.json --f=firstName "Pedro"
-./mine.sh profile_03-10-2025_consolidated.json --f=email "gmail"
-./mine.sh profile_03-10-2025_consolidated.json --f=city "São Paulo"
+npm run mine -- --f=lastPurchaseAmount profile_consolidated.json ">100"
+npm run mine -- --f=age profile_consolidated.json ">=18"
+npm run mine -- --f=loyaltyPoints profile_consolidated.json "<1000"
+npm run mine -- --f=totalOrders profile_consolidated.json "=5"
+```
+
+### String Contains Filters (auto-detected)
+```bash
+npm run mine -- --f=firstName profile_consolidated.json "Pedro"
+npm run mine -- --f=email profile_consolidated.json "gmail"
+npm run mine -- --f=city profile_consolidated.json "São Paulo"
 ```
 
 ### Mining Output
-- `profiles_datamined_YYYY-MM-DD-HH-MM-SS.json` - Filtered data with metadata
+- `profiles_datamined_YYYY-MM-DD-HH-MM-SS.json` - Filtered data with metadata and field analysis
 - `profiles_datamined_YYYY-MM-DD-HH-MM-SS.csv` - CSV format for analysis
+
+### Smart Analysis Features
+- **Type Detection**: Automatically analyzes field types from data samples
+- **Validation Warnings**: Alerts when condition doesn't match detected field type
+- **Field Analysis**: Shows detected type, confidence, and sample values
+- **Optimized Filtering**: Uses type-specific filtering for better performance
+- **Metadata Tracking**: Saves analysis details in output files
 
 ## Result Consolidation
 

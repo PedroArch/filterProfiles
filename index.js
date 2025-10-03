@@ -249,8 +249,15 @@ class ProfileFetcher {
         throw new Error(`Field '${field}' not found in any items. Available fields: ${Object.keys(items[0]).join(', ')}`);
       }
 
+      // Analyze field type
+      const fieldAnalysis = this.analyzeFieldType(items, field);
+      spinner.text = chalk.blue(`⛏️  Mining data... (Field: ${field}, Type: ${fieldAnalysis.type})`);
+
+      // Validate condition against field type
+      this.validateCondition(field, condition, fieldAnalysis);
+
       // Parse condition and filter data
-      const filteredItems = this.filterItems(items, field, condition);
+      const filteredItems = this.filterItems(items, field, condition, fieldAnalysis);
 
       if (filteredItems.length === 0) {
         spinner.warn(chalk.yellow(`No items match the condition: ${field} ${condition}`));
@@ -261,6 +268,12 @@ class ProfileFetcher {
       const result = {
         source: inputFile,
         filter: `${field} ${condition}`,
+        fieldAnalysis: {
+          fieldName: field,
+          detectedType: fieldAnalysis.type,
+          details: fieldAnalysis.details,
+          examples: fieldAnalysis.examples
+        },
         originalCount: items.length,
         filteredCount: filteredItems.length,
         items: filteredItems
@@ -290,7 +303,117 @@ class ProfileFetcher {
     }
   }
 
-  filterItems(items, field, condition) {
+  analyzeFieldType(items, field) {
+    const samples = items
+      .map(item => item[field])
+      .filter(value => value !== null && value !== undefined)
+      .slice(0, 100); // Analyze first 100 non-null values
+
+    if (samples.length === 0) {
+      return { type: 'null', details: 'All values are null/undefined' };
+    }
+
+    const analysis = {
+      booleanCount: 0,
+      numberCount: 0,
+      stringCount: 0,
+      dateCount: 0,
+      total: samples.length,
+      examples: samples.slice(0, 3)
+    };
+
+    samples.forEach(value => {
+      const strValue = String(value).toLowerCase();
+      
+      // Check boolean
+      if (strValue === 'true' || strValue === 'false' || typeof value === 'boolean') {
+        analysis.booleanCount++;
+      }
+      // Check number
+      else if (!isNaN(value) && !isNaN(parseFloat(value))) {
+        analysis.numberCount++;
+      }
+      // Check date
+      else if (typeof value === 'string' && this.isDateString(value)) {
+        analysis.dateCount++;
+      }
+      // String
+      else {
+        analysis.stringCount++;
+      }
+    });
+
+    // Determine primary type (>70% threshold)
+    const threshold = analysis.total * 0.7;
+    
+    if (analysis.booleanCount >= threshold) {
+      return { type: 'boolean', details: `${analysis.booleanCount}/${analysis.total} boolean values`, examples: analysis.examples };
+    }
+    if (analysis.numberCount >= threshold) {
+      return { type: 'number', details: `${analysis.numberCount}/${analysis.total} numeric values`, examples: analysis.examples };
+    }
+    if (analysis.dateCount >= threshold) {
+      return { type: 'date', details: `${analysis.dateCount}/${analysis.total} date values`, examples: analysis.examples };
+    }
+    
+    return { type: 'string', details: `${analysis.stringCount}/${analysis.total} string values`, examples: analysis.examples };
+  }
+
+  isDateString(value) {
+    // Common date patterns
+    const datePatterns = [
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, // ISO 8601
+      /^\d{4}-\d{2}-\d{2}/, // YYYY-MM-DD
+      /^\d{2}\/\d{2}\/\d{4}/, // MM/DD/YYYY
+      /^\d{2}-\d{2}-\d{4}/, // DD-MM-YYYY
+    ];
+
+    if (typeof value !== 'string') return false;
+    
+    return datePatterns.some(pattern => pattern.test(value)) && !isNaN(Date.parse(value));
+  }
+
+  validateCondition(field, condition, fieldAnalysis) {
+    const { type } = fieldAnalysis;
+
+    console.log(chalk.gray(`📊 Field Analysis: ${field} is ${chalk.bold(type)} (${fieldAnalysis.details})`));
+    console.log(chalk.gray(`🔍 Examples: ${fieldAnalysis.examples.join(', ')}`));
+
+    // Validate condition format based on field type
+    switch (type) {
+      case 'boolean':
+        if (!['true', 'false'].includes(condition.toLowerCase())) {
+          console.log(chalk.yellow(`⚠️  Warning: Expected boolean value (true/false), got: ${condition}`));
+        }
+        break;
+        
+      case 'number':
+        const numericMatch = condition.match(/^([><=]+)?\s*(-?\d+\.?\d*)$/);
+        if (!numericMatch) {
+          console.log(chalk.yellow(`⚠️  Warning: Expected numeric condition (e.g., >100, <=50), got: ${condition}`));
+        }
+        break;
+        
+      case 'date':
+        if (condition.includes(' ') && condition.split(' ').length === 2) {
+          const [start, end] = condition.split(' ');
+          if (isNaN(Date.parse(start)) || isNaN(Date.parse(end))) {
+            console.log(chalk.yellow(`⚠️  Warning: Expected date range (e.g., "2020-01-01 2023-12-31"), got: ${condition}`));
+          }
+        } else if (isNaN(Date.parse(condition))) {
+          console.log(chalk.yellow(`⚠️  Warning: Expected date value or range, got: ${condition}`));
+        }
+        break;
+        
+      case 'string':
+        // No specific validation for strings
+        break;
+    }
+  }
+
+  filterItems(items, field, condition, fieldAnalysis = null) {
+    const fieldType = fieldAnalysis?.type || 'string';
+
     return items.filter(item => {
       const value = item[field];
       
@@ -299,45 +422,89 @@ class ProfileFetcher {
         return condition.toLowerCase() === 'null' || condition.toLowerCase() === 'undefined';
       }
 
-      // Boolean conditions
-      if (condition.toLowerCase() === 'true' || condition.toLowerCase() === 'false') {
-        return String(value).toLowerCase() === condition.toLowerCase();
-      }
-
-      // Date range conditions (format: "startDate endDate")
-      if (condition.includes(' ') && condition.split(' ').length === 2) {
-        const [startDate, endDate] = condition.split(' ');
-        const itemDate = new Date(value);
-        const start = new Date(startDate);
-        const end = new Date(endDate);
+      // Type-specific filtering with optimization
+      switch (fieldType) {
+        case 'boolean':
+          return this.filterBoolean(value, condition);
         
-        if (!isNaN(itemDate) && !isNaN(start) && !isNaN(end)) {
-          return itemDate >= start && itemDate <= end;
-        }
-      }
-
-      // Numeric conditions (>, <, =, >=, <=)
-      const numericMatch = condition.match(/^([><=]+)?\s*(-?\d+\.?\d*)$/);
-      if (numericMatch) {
-        const operator = numericMatch[1] || '=';
-        const conditionValue = parseFloat(numericMatch[2]);
-        const itemValue = parseFloat(value);
+        case 'number':
+          return this.filterNumber(value, condition);
         
-        if (!isNaN(itemValue)) {
-          switch (operator) {
-            case '>': return itemValue > conditionValue;
-            case '<': return itemValue < conditionValue;
-            case '>=': return itemValue >= conditionValue;
-            case '<=': return itemValue <= conditionValue;
-            case '=': 
-            default: return itemValue === conditionValue;
-          }
-        }
+        case 'date':
+          return this.filterDate(value, condition);
+        
+        case 'string':
+        default:
+          return this.filterString(value, condition);
       }
-
-      // String contains condition (default)
-      return String(value).toLowerCase().includes(condition.toLowerCase());
     });
+  }
+
+  filterBoolean(value, condition) {
+    const boolCondition = condition.toLowerCase();
+    const boolValue = String(value).toLowerCase();
+    
+    if (boolCondition === 'true' || boolCondition === 'false') {
+      return boolValue === boolCondition;
+    }
+    
+    // Fallback to string contains for non-boolean conditions
+    return this.filterString(value, condition);
+  }
+
+  filterNumber(value, condition) {
+    // Try numeric comparison first
+    const numericMatch = condition.match(/^([><=]+)?\s*(-?\d+\.?\d*)$/);
+    if (numericMatch) {
+      const operator = numericMatch[1] || '=';
+      const conditionValue = parseFloat(numericMatch[2]);
+      const itemValue = parseFloat(value);
+      
+      if (!isNaN(itemValue) && !isNaN(conditionValue)) {
+        switch (operator) {
+          case '>': return itemValue > conditionValue;
+          case '<': return itemValue < conditionValue;
+          case '>=': return itemValue >= conditionValue;
+          case '<=': return itemValue <= conditionValue;
+          case '=': 
+          default: return itemValue === conditionValue;
+        }
+      }
+    }
+    
+    // Fallback to string contains
+    return this.filterString(value, condition);
+  }
+
+  filterDate(value, condition) {
+    // Date range conditions (format: "startDate endDate")
+    if (condition.includes(' ') && condition.split(' ').length === 2) {
+      const [startDate, endDate] = condition.split(' ');
+      const itemDate = new Date(value);
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      
+      if (!isNaN(itemDate) && !isNaN(start) && !isNaN(end)) {
+        return itemDate >= start && itemDate <= end;
+      }
+    }
+    
+    // Single date comparison
+    const conditionDate = new Date(condition);
+    if (!isNaN(conditionDate)) {
+      const itemDate = new Date(value);
+      if (!isNaN(itemDate)) {
+        // Same day comparison (ignoring time)
+        return itemDate.toDateString() === conditionDate.toDateString();
+      }
+    }
+    
+    // Fallback to string contains
+    return this.filterString(value, condition);
+  }
+
+  filterString(value, condition) {
+    return String(value).toLowerCase().includes(condition.toLowerCase());
   }
 
   async generateMinedCSV(result, timestamp) {

@@ -7,6 +7,7 @@
     "start": "node index.js",
     "searchProfile": "node index.js searchProfiles",
     "search": "node index.js searchProfiles",
+    "mine": "node index.js mineResult",
     "auth": "node index.js auth"
   },
   "dependencies": {
