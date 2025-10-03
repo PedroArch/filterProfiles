@@ -24,6 +24,6 @@
     "api",
     "fetcher"
   ],
-  "author": "Pedro",
-  "license": "ISC"
+  "author": "Pedro Carvalho",
+  "license": "MIT"
 }
