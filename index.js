@@ -148,9 +148,78 @@ class ProfileFetcher {
       console.log(chalk.cyan(`🗂️  Total items: ${chalk.bold(allItems.length)}`));
       console.log(chalk.cyan(`🗑️  Deleted ${chalk.bold(filesToDelete.length)} original files\n`));
 
+      // Generate CSV file
+      await this.generateCSV(consolidatedResult, baseName);
+
     } catch (error) {
-      spinner.fail(chalk.red('Error consolidating results'));
-      console.error(chalk.red('Details:'), error.message);
+      spinner.fail(chalk.red('❌ Error consolidating results:'));
+      console.error(error.message);
+      throw error;
+    }
+  }
+
+  async generateCSV(consolidatedResult, baseName) {
+    const spinner = ora(chalk.blue('📊 Generating CSV file...')).start();
+    
+    try {
+      const items = consolidatedResult.items;
+      
+      if (items.length === 0) {
+        spinner.warn(chalk.yellow('No items to export to CSV'));
+        return;
+      }
+
+      // Get all unique fields from all items
+      const allFields = new Set();
+      items.forEach(item => {
+        Object.keys(item).forEach(key => allFields.add(key));
+      });
+      
+      const fields = Array.from(allFields).sort();
+      
+      // Create CSV header
+      let csvContent = fields.join(',') + '\n';
+      
+      // Add data rows
+      items.forEach(item => {
+        const row = fields.map(field => {
+          let value = item[field];
+          
+          // Handle different data types
+          if (value === null || value === undefined) {
+            return '';
+          }
+          
+          // Convert objects/arrays to JSON string
+          if (typeof value === 'object') {
+            value = JSON.stringify(value);
+          }
+          
+          // Escape quotes and wrap in quotes if contains comma or quotes
+          value = String(value);
+          if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+            value = '"' + value.replace(/"/g, '""') + '"';
+          }
+          
+          return value;
+        });
+        
+        csvContent += row.join(',') + '\n';
+      });
+      
+      // Save CSV file
+      const csvFilename = `${baseName}_consolidated.csv`;
+      const csvFilepath = path.join(this.resultDir, csvFilename);
+      
+      fs.writeFileSync(csvFilepath, csvContent, 'utf8');
+      
+      spinner.succeed(chalk.green('CSV file generated successfully!'));
+      console.log(chalk.cyan(`📊 CSV file: ${csvFilename}`));
+      console.log(chalk.cyan(`📋 Columns: ${chalk.bold(fields.length)} (${fields.join(', ')})\n`));
+      
+    } catch (error) {
+      spinner.fail(chalk.red('❌ Error generating CSV:'));
+      console.error(error.message);
       throw error;
     }
   }
