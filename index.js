@@ -132,8 +132,8 @@ class ProfileFetcher {
         items: allItems
       };
 
-      // Save consolidated file
-      const resultFilename = `${baseName}_consolidated.json`;
+      // Save consolidated file with unique name
+      const resultFilename = this.generateUniqueFilename(this.resultDir, `${baseName}_consolidated`, 'json');
       const resultFilepath = path.join(this.resultDir, resultFilename);
       
       fs.writeFileSync(resultFilepath, JSON.stringify(consolidatedResult, null, 2));
@@ -149,7 +149,7 @@ class ProfileFetcher {
       console.log(chalk.cyan(`🗑️  Deleted ${chalk.bold(filesToDelete.length)} original files\n`));
 
       // Generate CSV file
-      await this.generateCSV(consolidatedResult, baseName);
+      await this.generateCSV(consolidatedResult, resultFilename);
 
     } catch (error) {
       spinner.fail(chalk.red('❌ Error consolidating results:'));
@@ -158,7 +158,7 @@ class ProfileFetcher {
     }
   }
 
-  async generateCSV(consolidatedResult, baseName) {
+  async generateCSV(consolidatedResult, jsonFilename) {
     const spinner = ora(chalk.blue('📊 Generating CSV file...')).start();
     
     try {
@@ -207,8 +207,8 @@ class ProfileFetcher {
         csvContent += row.join(',') + '\n';
       });
       
-      // Save CSV file
-      const csvFilename = `${baseName}_consolidated.csv`;
+      // Create CSV filename based on JSON filename
+      const csvFilename = jsonFilename.replace('.json', '.csv');
       const csvFilepath = path.join(this.resultDir, csvFilename);
       
       fs.writeFileSync(csvFilepath, csvContent, 'utf8');
@@ -279,22 +279,22 @@ class ProfileFetcher {
         items: filteredItems
       };
 
-      // Generate output filename
+      // Generate unique output filename
       const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
-      const outputFilename = `profiles_datamined_${timestamp}.json`;
+      const outputFilename = this.generateUniqueFilename(this.resultDir, `profiles_datamined_${timestamp}`, 'json');
       const outputPath = path.join(this.resultDir, outputFilename);
 
       // Save filtered data
       fs.writeFileSync(outputPath, JSON.stringify(result, null, 2));
 
       // Generate CSV for mined data
-      await this.generateMinedCSV(result, timestamp);
+      await this.generateMinedCSV(result, outputFilename);
 
       spinner.succeed(chalk.green('Data mining completed successfully!'));
       console.log(chalk.cyan(`📊 Original items: ${chalk.bold(items.length)}`));
       console.log(chalk.cyan(`🎯 Filtered items: ${chalk.bold(filteredItems.length)}`));
       console.log(chalk.cyan(`📄 JSON output: ${outputFilename}`));
-      console.log(chalk.cyan(`📊 CSV output: profiles_datamined_${timestamp}.csv\n`));
+      console.log(chalk.cyan(`📊 CSV output: ${outputFilename.replace('.json', '.csv')}\n`));
 
     } catch (error) {
       spinner.fail(chalk.red('❌ Error mining data:'));
@@ -507,7 +507,7 @@ class ProfileFetcher {
     return String(value).toLowerCase().includes(condition.toLowerCase());
   }
 
-  async generateMinedCSV(result, timestamp) {
+  async generateMinedCSV(result, jsonFilename) {
     try {
       const items = result.items;
       
@@ -550,8 +550,8 @@ class ProfileFetcher {
         csvContent += row.join(',') + '\n';
       });
       
-      // Save CSV file
-      const csvFilename = `profiles_datamined_${timestamp}.csv`;
+      // Create CSV filename based on JSON filename
+      const csvFilename = jsonFilename.replace('.json', '.csv');
       const csvFilepath = path.join(this.resultDir, csvFilename);
       
       fs.writeFileSync(csvFilepath, csvContent, 'utf8');
@@ -602,6 +602,36 @@ class ProfileFetcher {
       console.log(chalk.yellow('🔄 Token expired or missing, refreshing...'));
       await this.authenticate();
     }
+  }
+
+  generateUniqueFilename(directory, basePattern, extension) {
+    if (!fs.existsSync(directory)) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+    
+    const baseFilename = `${basePattern}.${extension}`;
+    const basePath = path.join(directory, baseFilename);
+    
+    // If base filename doesn't exist, use it
+    if (!fs.existsSync(basePath)) {
+      return baseFilename;
+    }
+    
+    // Find the highest number in parentheses
+    let maxNumber = 0;
+    const files = fs.readdirSync(directory);
+    
+    files.forEach(file => {
+      const regex = new RegExp(`^${basePattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\((\\d+)\\))?\\.${extension}$`);
+      const match = file.match(regex);
+      if (match) {
+        const number = match[2] ? parseInt(match[2]) : 0;
+        maxNumber = Math.max(maxNumber, number);
+      }
+    });
+    
+    const nextNumber = maxNumber + 1;
+    return `${basePattern}(${nextNumber}).${extension}`;
   }
 
   generateUniqueBaseName() {
