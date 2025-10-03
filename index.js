@@ -150,6 +150,10 @@ class ProfileFetcher {
 
       // Generate CSV file
       await this.generateCSV(consolidatedResult, resultFilename);
+      
+      // Return info about created files
+      const csvFilename = resultFilename.replace('.json', '.csv');
+      return [resultFilename, csvFilename];
 
     } catch (error) {
       spinner.fail(chalk.red('❌ Error consolidating results:'));
@@ -561,6 +565,29 @@ class ProfileFetcher {
     }
   }
 
+  displayCreatedFilesSummary(createdFiles, consolidate) {
+    console.log(chalk.blue.bold('\n📂 Files Created:'));
+    
+    if (consolidate && createdFiles.consolidatedFiles.length > 0) {
+      console.log(chalk.green('📊 Consolidated Results:'));
+      createdFiles.consolidatedFiles.forEach(filename => {
+        const isCSV = filename.endsWith('.csv');
+        const icon = isCSV ? '📋' : '📄';
+        const location = 'result/';
+        console.log(chalk.cyan(`  ${icon} ${location}${filename}`));
+      });
+    } else if (createdFiles.responseFiles.length > 0) {
+      console.log(chalk.green('📁 Response Files:'));
+      createdFiles.responseFiles.forEach(filename => {
+        const location = 'responses/';
+        console.log(chalk.cyan(`  📄 ${location}${filename}`));
+      });
+    }
+    
+    const totalFiles = createdFiles.responseFiles.length + createdFiles.consolidatedFiles.length;
+    console.log(chalk.gray(`\n📈 Total files: ${chalk.bold(totalFiles)}`));
+  }
+
   isTokenExpired() {
     if (!this.tokenExpiresAt) return true;
     // Check if token expires in the next 30 seconds (buffer time)
@@ -738,8 +765,29 @@ class ProfileFetcher {
           console.log(chalk.cyan(`📈 Total profiles fetched: ${chalk.bold(fetchedProfiles)}/${chalk.bold(totalProfiles)}`));
           console.log(chalk.cyan(`📁 Total files generated: ${chalk.bold(requestCount)}`));
           
-          // Consolidate results if requested
-          await this.consolidateResults(baseName, totalProfiles, consolidate);
+          // Collect created files info
+          const createdFiles = {
+            responseFiles: [],
+            consolidatedFiles: []
+          };
+          
+          // Add response files (if not consolidated, they remain)
+          if (!consolidate) {
+            for (let i = 1; i <= requestCount; i++) {
+              createdFiles.responseFiles.push(`${baseName}_${i}.json`);
+            }
+          }
+          
+          // Consolidate results if requested and collect consolidated files
+          if (consolidate) {
+            const consolidatedInfo = await this.consolidateResults(baseName, totalProfiles, consolidate);
+            if (consolidatedInfo) {
+              createdFiles.consolidatedFiles = consolidatedInfo;
+            }
+          }
+          
+          // Display created files summary
+          this.displayCreatedFilesSummary(createdFiles, consolidate);
           
           break;
         }
@@ -788,7 +836,7 @@ program
       const fetcher = new ProfileFetcher(options.env);
       await fetcher.searchProfiles(options.q, value, options.f || '', options.c || false);
       
-      console.log(chalk.green.bold('\n🎉 Operation completed successfully!'));
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
     } catch (error) {
       console.error(chalk.red.bold('\n❌ Error:'), error.message);
       process.exit(1);
