@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# Product Fetcher Wrapper Script
+# Usage: ./search_product --q="not (childSKUs pr)" --f=id,displayName,childSKUs.repositoryId --env=prod
+
+node index.js searchProducts "$@"

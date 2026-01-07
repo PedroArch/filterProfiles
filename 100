@@ -1,0 +1,6 @@
+
+> profile-fetcher@1.0.0 mine /home/pedro/projects/filterProfiles
+> node index.js mineResult "--f=lastPurchaseAmount" "profile_03-10-2025_consolidated.json"
+
+⛏️  Profile Data Miner v1.0.0
+

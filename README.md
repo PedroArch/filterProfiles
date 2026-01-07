@@ -34,6 +34,7 @@ Edit `.env` file with your actual Oracle Commerce Cloud credentials.
 ```bash
 chmod +x index.js
 chmod +x *.sh
+chmod +x search_product
 ```
 
 ## Environment Configuration
@@ -75,6 +76,11 @@ PROD_BEARER_TOKEN=your_actual_prod_token_here
 ./search.sh --q=email "pedro.franco" --f=firstName,id --env=prod
 ```
 
+#### Search products with a custom query
+```bash
+./search_product --q="not (childSKUs pr)" --f=id,displayName,childSKUs.repositoryId --env=prod
+```
+
 #### Test authentication
 ```bash
 ./auth.sh --env=dev
@@ -92,6 +98,9 @@ npm run searchProfile -- --q=firstName "carlos" --f=firstName,id --env=prod
 # or using the shorter alias:
 npm run search -- --q=email "pedro" --env=prod
 
+# Search products
+npm run searchProduct -- --q="not (childSKUs pr)" --f=id,displayName,childSKUs.repositoryId --env=prod
+
 # Test authentication  
 npm run auth -- --env=dev
 
@@ -106,6 +115,7 @@ npm run a --env=dev
 
 ```bash
 node index.js searchProfiles --q=firstName "carlos" --env=prod
+node index.js searchProducts --q="not (childSKUs pr)" --f=id,displayName,childSKUs.repositoryId --env=prod
 node index.js auth --env=dev
 ```
 

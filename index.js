@@ -28,7 +28,8 @@ const config = {
   },
   endpoints: {
     login: '/ccadmin/v1/login',
-    profiles: '/ccadmin/v1/profiles'
+    profiles: '/ccadmin/v1/profiles',
+    products: '/ccadmin/v1/products'
   },
   limits: {
     profilesPerRequest: parseInt(process.env.PROFILES_LIMIT) || 250
@@ -661,7 +662,7 @@ class ProfileFetcher {
     return `${basePattern}(${nextNumber}).${extension}`;
   }
 
-  generateUniqueBaseName() {
+  generateUniqueBaseName(prefix = 'profile') {
     const now = new Date();
     const day = String(now.getDate()).padStart(2, '0');
     const month = String(now.getMonth() + 1).padStart(2, '0');
@@ -669,18 +670,20 @@ class ProfileFetcher {
     const dateStr = `${day}-${month}-${year}`;
     
     // Check for existing files with the same date
-    const basePattern = `profile_${dateStr}`;
+    const basePattern = `${prefix}_${dateStr}`;
     const existingFiles = fs.readdirSync(this.responsesDir)
       .filter(file => file.startsWith(basePattern) && file.endsWith('.json'));
     
     if (existingFiles.length === 0) {
-      return `profile_${dateStr}`;
+      return `${prefix}_${dateStr}`;
     }
     
     // Find the highest execution number for today
     let maxExecNumber = 0;
+    const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const filenameRegex = new RegExp(`^${escapedPrefix}_\\d{2}-\\d{2}-\\d{4}(\\((\\d+)\\))?_\\d+\\.json$`);
     existingFiles.forEach(file => {
-      const match = file.match(/profile_\d{2}-\d{2}-\d{4}(\((\d+)\))?_\d+\.json/);
+      const match = file.match(filenameRegex);
       if (match) {
         const execNumber = match[2] ? parseInt(match[2]) : 0;
         maxExecNumber = Math.max(maxExecNumber, execNumber);
@@ -688,7 +691,7 @@ class ProfileFetcher {
     });
     
     const nextExecNumber = maxExecNumber + 1;
-    return `profile_${dateStr}(${nextExecNumber})`;
+    return `${prefix}_${dateStr}(${nextExecNumber})`;
   }
 
   async searchProfiles(queryField, queryValue, fields = '', consolidate = false) {
@@ -706,7 +709,7 @@ class ProfileFetcher {
       let requestCount = 0;
       
       // Generate unique base name for this execution
-      const baseName = this.generateUniqueBaseName();
+      const baseName = this.generateUniqueBaseName('profile');
 
       while (true) {
         // Ensure token is valid before each request
@@ -803,6 +806,108 @@ class ProfileFetcher {
       throw error;
     }
   }
+
+  async searchProducts(query, fields = '', consolidate = false) {
+    await this.ensureValidToken();
+
+    console.log(chalk.cyan(`🔍 Searching products with query "${chalk.bold(query)}"...`));
+    if (fields) {
+      console.log(chalk.gray(`📋 Selected fields: ${fields}\n`));
+    }
+
+    try {
+      let offset = 0;
+      let totalProducts = 0;
+      let fetchedProducts = 0;
+      let requestCount = 0;
+
+      const baseName = this.generateUniqueBaseName('product');
+
+      while (true) {
+        await this.ensureValidToken();
+
+        requestCount++;
+
+        const spinner = ora(chalk.blue(`Making request ${requestCount} (offset: ${offset})...`)).start();
+
+        const fieldsParam = this.buildFieldsParam(fields);
+        const url = `${this.config.baseUrl}${config.endpoints.products}`;
+
+        const params = {
+          q: query,
+          offset: offset,
+          limit: config.limits.profilesPerRequest
+        };
+
+        if (fieldsParam) {
+          params.fields = fieldsParam;
+        }
+
+        const response = await axios.get(url, {
+          params,
+          headers: {
+            'Authorization': `Bearer ${this.accessToken}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        const data = response.data;
+
+        if (requestCount === 1) {
+          totalProducts = data.totalResults;
+          spinner.succeed(chalk.green(`Request ${requestCount} completed`));
+          console.log(chalk.magenta(`📊 Total products found: ${chalk.bold(totalProducts)}`));
+        } else {
+          spinner.succeed(chalk.green(`Request ${requestCount} completed`));
+        }
+
+        const filename = `${baseName}_${requestCount}.json`;
+        const filepath = path.join(this.responsesDir, filename);
+
+        fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
+        console.log(chalk.gray(`💾 Response saved to: ${filename}`));
+        console.log(chalk.gray(`📄 Products in this response: ${data.items.length}\n`));
+
+        fetchedProducts += data.items.length;
+
+        if (fetchedProducts >= totalProducts || data.items.length < config.limits.profilesPerRequest) {
+          console.log(chalk.green.bold(`✅ Search completed!`));
+          console.log(chalk.cyan(`📈 Total products fetched: ${chalk.bold(fetchedProducts)}/${chalk.bold(totalProducts)}`));
+          console.log(chalk.cyan(`📁 Total files generated: ${chalk.bold(requestCount)}`));
+
+          const createdFiles = {
+            responseFiles: [],
+            consolidatedFiles: []
+          };
+
+          if (!consolidate) {
+            for (let i = 1; i <= requestCount; i++) {
+              createdFiles.responseFiles.push(`${baseName}_${i}.json`);
+            }
+          }
+
+          if (consolidate) {
+            const consolidatedInfo = await this.consolidateResults(baseName, totalProducts, consolidate);
+            if (consolidatedInfo) {
+              createdFiles.consolidatedFiles = consolidatedInfo;
+            }
+          }
+
+          this.displayCreatedFilesSummary(createdFiles, consolidate);
+
+          break;
+        }
+
+        offset += config.limits.profilesPerRequest;
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+    } catch (error) {
+      console.error(chalk.red('❌ Error searching products:'), error.response?.data || error.message);
+      throw error;
+    }
+  }
 }
 
 // Configurar CLI
@@ -885,6 +990,31 @@ program
       console.log(chalk.green.bold('🎉 Authentication test completed successfully!'));
     } catch (error) {
       console.error(chalk.red.bold('❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('searchProducts')
+  .description('Search products with custom query')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .option('--q <query>', 'Query string (e.g: not (childSKUs pr))')
+  .option('--f <fields>', 'Fields to return (e.g: id,displayName,childSKUs.repositoryId)')
+  .option('--c', 'Consolidate results into a single file and delete originals')
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue.bold('🚀 Product Fetcher v1.0.0\n'));
+
+      if (!options.q) {
+        throw new Error('Query parameter --q is required (e.g: --q "not (childSKUs pr)")');
+      }
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.searchProducts(options.q, options.f || '', options.c || false);
+
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
       process.exit(1);
     }
   });
