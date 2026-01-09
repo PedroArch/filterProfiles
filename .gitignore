@@ -9,6 +9,9 @@ package-lock.json
 # Output directories
 responses/
 result/
+output/
+outputs/
+processed/
 
 # IDE files
 .vscode/

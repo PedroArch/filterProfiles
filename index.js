@@ -39,14 +39,14 @@ const config = {
 class ProfileFetcher {
   constructor(environment) {
     this.validateEnvironment(environment);
-    
+
     this.environment = environment;
     this.config = config.environments[environment];
     this.accessToken = null;
     this.tokenExpiresAt = null;
     this.responsesDir = path.join(__dirname, 'responses');
-    this.resultDir = path.join(__dirname, 'result');
-    
+    this.resultDir = path.join(__dirname, 'outputs');
+
     this.ensureResponsesDirectory();
     this.ensureResultDirectory();
   }
@@ -94,11 +94,11 @@ class ProfileFetcher {
     return `${queryField} co "${queryValue}"`;
   }
 
-  async consolidateResults(baseName, totalProfiles, consolidate = false) {
+  async consolidateResults(baseName, totalProfiles, consolidate = false, paOnly = false) {
     if (!consolidate) return;
 
     const spinner = ora(chalk.blue('🔄 Consolidating results...')).start();
-    
+
     try {
       // Find all files from this execution
       const executionFiles = fs.readdirSync(this.responsesDir)
@@ -115,46 +115,59 @@ class ProfileFetcher {
       }
 
       // Consolidate all items
-      const allItems = [];
+      let allItems = [];
       const filesToDelete = [];
 
       for (const filename of executionFiles) {
         const filepath = path.join(this.responsesDir, filename);
         const data = JSON.parse(fs.readFileSync(filepath, 'utf8'));
-        
+
         allItems.push(...data.items);
         filesToDelete.push(filepath);
       }
 
+      // Filter PA-only products if requested
+      if (paOnly) {
+        const originalCount = allItems.length;
+        allItems = allItems.filter(item => {
+          const id = item.id || item.repositoryId || item.productId || item.Id;
+          return id && id.startsWith('PA');
+        });
+        const filteredCount = originalCount - allItems.length;
+        if (filteredCount > 0) {
+          console.log(chalk.gray(`  Filtered out ${filteredCount} non-PA products from consolidated results`));
+        }
+      }
+
       // Create consolidated result
       const consolidatedResult = {
-        total: totalProfiles,
+        total: allItems.length,
         env: this.environment,
         items: allItems
       };
 
       // Save consolidated file with unique name
-      const resultFilename = this.generateUniqueFilename(this.resultDir, `${baseName}_consolidated`, 'json');
-      const resultFilepath = path.join(this.resultDir, resultFilename);
-      
-      fs.writeFileSync(resultFilepath, JSON.stringify(consolidatedResult, null, 2));
-      
+      const outputFilename = this.generateUniqueFilename(this.resultDir, `${baseName}_consolidated`, 'json');
+      const outputFilepath = path.join(this.resultDir, outputFilename);
+
+      fs.writeFileSync(outputFilepath, JSON.stringify(consolidatedResult, null, 2));
+
       // Delete original files
       filesToDelete.forEach(filepath => {
         fs.unlinkSync(filepath);
       });
 
       spinner.succeed(chalk.green('Results consolidated successfully!'));
-      console.log(chalk.cyan(`📄 Consolidated file: ${resultFilename}`));
+      console.log(chalk.cyan(`📄 Consolidated file: ${outputFilename}`));
       console.log(chalk.cyan(`🗂️  Total items: ${chalk.bold(allItems.length)}`));
       console.log(chalk.cyan(`🗑️  Deleted ${chalk.bold(filesToDelete.length)} original files\n`));
 
       // Generate CSV file
-      await this.generateCSV(consolidatedResult, resultFilename);
-      
+      await this.generateCSV(consolidatedResult, outputFilename);
+
       // Return info about created files
-      const csvFilename = resultFilename.replace('.json', '.csv');
-      return [resultFilename, csvFilename];
+      const csvFilename = outputFilename.replace('.json', '.csv');
+      return [outputFilename, csvFilename];
 
     } catch (error) {
       spinner.fail(chalk.red('❌ Error consolidating results:'));
@@ -574,7 +587,7 @@ class ProfileFetcher {
       createdFiles.consolidatedFiles.forEach(filename => {
         const isCSV = filename.endsWith('.csv');
         const icon = isCSV ? '📋' : '📄';
-        const location = 'result/';
+        const location = 'outputs/';
         console.log(chalk.cyan(`  ${icon} ${location}${filename}`));
       });
     } else if (createdFiles.responseFiles.length > 0) {
@@ -783,7 +796,7 @@ class ProfileFetcher {
           
           // Consolidate results if requested and collect consolidated files
           if (consolidate) {
-            const consolidatedInfo = await this.consolidateResults(baseName, totalProfiles, consolidate);
+            const consolidatedInfo = await this.consolidateResults(baseName, totalProfiles, consolidate, false);
             if (consolidatedInfo) {
               createdFiles.consolidatedFiles = consolidatedInfo;
             }
@@ -807,7 +820,60 @@ class ProfileFetcher {
     }
   }
 
-  async searchProducts(query, fields = '', consolidate = false) {
+  async generateProductIdList(consolidatedResult, jsonFilename, paOnly = false) {
+    const spinner = ora(chalk.blue('📋 Generating product ID list CSV...')).start();
+
+    try {
+      const items = consolidatedResult.items;
+
+      if (items.length === 0) {
+        spinner.warn(chalk.yellow('No items to export to ID list'));
+        return;
+      }
+
+      // Extract IDs - try common ID field names
+      let ids = items.map(item => {
+        return item.id || item.repositoryId || item.productId || item.Id;
+      }).filter(id => id); // Remove undefined/null values
+
+      // Filter only IDs starting with "PA" if flag is set
+      if (paOnly) {
+        const originalCount = ids.length;
+        ids = ids.filter(id => id.startsWith('PA'));
+        const filteredCount = originalCount - ids.length;
+        if (filteredCount > 0) {
+          console.log(chalk.gray(`  Filtered out ${filteredCount} non-PA IDs`));
+        }
+      }
+
+      if (ids.length === 0) {
+        spinner.warn(chalk.yellow('No valid IDs found after filtering'));
+        return;
+      }
+
+      // Create CSV content - just IDs, one per line, no header
+      const csvContent = ids.join('\n');
+
+      // Create filename
+      const idListFilename = jsonFilename.replace('.json', '_ids.csv');
+      const csvFilepath = path.join(this.resultDir, idListFilename);
+
+      fs.writeFileSync(csvFilepath, csvContent, 'utf8');
+
+      spinner.succeed(chalk.green('Product ID list generated successfully!'));
+      console.log(chalk.cyan(`📋 ID List file: ${idListFilename}`));
+      console.log(chalk.cyan(`🔢 Total IDs: ${chalk.bold(ids.length)}\n`));
+
+      return idListFilename;
+
+    } catch (error) {
+      spinner.fail(chalk.red('❌ Error generating ID list:'));
+      console.error(error.message);
+      throw error;
+    }
+  }
+
+  async searchProducts(query, fields = '', consolidate = false, generateIdList = false, paOnly = false) {
     await this.ensureValidToken();
 
     console.log(chalk.cyan(`🔍 Searching products with query "${chalk.bold(query)}"...`));
@@ -821,7 +887,7 @@ class ProfileFetcher {
       let fetchedProducts = 0;
       let requestCount = 0;
 
-      const baseName = this.generateUniqueBaseName('product');
+      const baseName = this.generateUniqueBaseName('products');
 
       while (true) {
         await this.ensureValidToken();
@@ -880,20 +946,30 @@ class ProfileFetcher {
             consolidatedFiles: []
           };
 
-          if (!consolidate) {
+          if (!consolidate && !generateIdList) {
             for (let i = 1; i <= requestCount; i++) {
               createdFiles.responseFiles.push(`${baseName}_${i}.json`);
             }
           }
 
-          if (consolidate) {
-            const consolidatedInfo = await this.consolidateResults(baseName, totalProducts, consolidate);
+          if (consolidate || generateIdList) {
+            const consolidatedInfo = await this.consolidateResults(baseName, totalProducts, true, paOnly);
             if (consolidatedInfo) {
               createdFiles.consolidatedFiles = consolidatedInfo;
+
+              // Generate ID list if requested
+              if (generateIdList) {
+                const consolidatedFilePath = path.join(this.resultDir, consolidatedInfo[0]);
+                const consolidatedData = JSON.parse(fs.readFileSync(consolidatedFilePath, 'utf8'));
+                const idListFile = await this.generateProductIdList(consolidatedData, consolidatedInfo[0], paOnly);
+                if (idListFile) {
+                  createdFiles.consolidatedFiles.push(idListFile);
+                }
+              }
             }
           }
 
-          this.displayCreatedFilesSummary(createdFiles, consolidate);
+          this.displayCreatedFilesSummary(createdFiles, consolidate || generateIdList);
 
           break;
         }
@@ -905,6 +981,203 @@ class ProfileFetcher {
 
     } catch (error) {
       console.error(chalk.red('❌ Error searching products:'), error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  ensureProcessedDirectory() {
+    const processedDir = path.join(__dirname, 'processed');
+    if (!fs.existsSync(processedDir)) {
+      fs.mkdirSync(processedDir, { recursive: true });
+    }
+    return processedDir;
+  }
+
+  async deleteProducts(csvFile = null, concurrency = 1) {
+    await this.ensureValidToken();
+
+    try {
+      const assetsDir = path.join(__dirname, 'inputs');
+      let csvPath;
+      let actualFileName;
+
+      // Se não foi fornecido um arquivo específico, procurar por arquivo começando com "products"
+      if (!csvFile) {
+        const files = fs.readdirSync(assetsDir);
+        const productFiles = files.filter(file =>
+          file.toLowerCase().startsWith('products') &&
+          (file.endsWith('.csv') || file.endsWith('.txt'))
+        );
+
+        if (productFiles.length === 0) {
+          throw new Error('No file starting with "products" found in inputs/ folder');
+        }
+
+        if (productFiles.length > 1) {
+          console.log(chalk.yellow(`⚠️  Multiple product files found:`));
+          productFiles.forEach((file, index) => {
+            console.log(chalk.gray(`  ${index + 1}. ${file}`));
+          });
+          console.log(chalk.cyan(`Using: ${chalk.bold(productFiles[0])}\n`));
+        }
+
+        actualFileName = productFiles[0];
+        csvPath = path.join(assetsDir, actualFileName);
+      } else {
+        actualFileName = csvFile;
+        csvPath = path.join(assetsDir, csvFile);
+
+        if (!fs.existsSync(csvPath)) {
+          throw new Error(`CSV file not found: ${csvPath}`);
+        }
+      }
+
+      console.log(chalk.cyan(`🗑️  Starting product deletion from ${chalk.bold(actualFileName)}...`));
+      console.log(chalk.gray(`⚡ Concurrency level: ${chalk.bold(concurrency)} parallel request(s)\n`));
+
+      const csvContent = fs.readFileSync(csvPath, 'utf8');
+      const productIds = csvContent
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+
+      console.log(chalk.magenta(`📊 Total products to delete: ${chalk.bold(productIds.length)}\n`));
+
+      // Relatório de resultados
+      const report = {
+        total: productIds.length,
+        deleted: 0,
+        failed: 0,
+        skipped: 0,
+        invalidIds: [],
+        errors: [],
+        startTime: new Date().toISOString(),
+        environment: this.environment,
+        concurrency: concurrency
+      };
+
+      // Processar produtos com concorrência controlada
+      let processedCount = 0;
+      const activeSpinners = new Map();
+
+      const deleteProduct = async (productId, index) => {
+        // Validar se o ID começa com "PA"
+        if (!productId.startsWith('PA')) {
+          report.skipped++;
+          report.invalidIds.push(productId);
+          console.log(chalk.gray(`[${index + 1}/${productIds.length}] Skipping ${chalk.bold(productId)} - Invalid ID (must start with "PA")`));
+          return;
+        }
+
+        await this.ensureValidToken();
+
+        const spinner = ora(
+          chalk.blue(`[${index + 1}/${productIds.length}] Deleting product ${chalk.bold(productId)}...`)
+        ).start();
+
+        activeSpinners.set(productId, spinner);
+
+        try {
+          const url = `${this.config.baseUrl}${config.endpoints.products}/${productId}`;
+
+          await axios.delete(url, {
+            headers: {
+              'Authorization': `Bearer ${this.accessToken}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          report.deleted++;
+          spinner.succeed(chalk.green(`[${index + 1}/${productIds.length}] Product ${chalk.bold(productId)} deleted successfully`));
+
+        } catch (error) {
+          report.failed++;
+          const errorMsg = error.response?.data?.message || error.message;
+          const errorDetail = {
+            productId,
+            error: errorMsg,
+            statusCode: error.response?.status
+          };
+          report.errors.push(errorDetail);
+
+          if (error.response?.status === 404) {
+            spinner.warn(chalk.yellow(`[${index + 1}/${productIds.length}] Product ${chalk.bold(productId)} not found (404)`));
+          } else {
+            spinner.fail(chalk.red(`[${index + 1}/${productIds.length}] Failed to delete ${chalk.bold(productId)}: ${errorMsg}`));
+          }
+        } finally {
+          activeSpinners.delete(productId);
+        }
+      };
+
+      // Processar em lotes com concorrência controlada
+      for (let i = 0; i < productIds.length; i += concurrency) {
+        const batch = productIds.slice(i, i + concurrency);
+        const batchPromises = batch.map((productId, batchIndex) =>
+          deleteProduct(productId, i + batchIndex)
+        );
+
+        await Promise.all(batchPromises);
+        processedCount += batch.length;
+      }
+
+      report.endTime = new Date().toISOString();
+
+      // Salvar relatório
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+      const reportFilename = this.generateUniqueFilename(this.resultDir, `delete_report_${timestamp}`, 'json');
+      const reportPath = path.join(this.resultDir, reportFilename);
+
+      fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+
+      // Exibir resumo final
+      console.log(chalk.blue.bold('\n' + '='.repeat(60)));
+      console.log(chalk.blue.bold('📊 DELETION REPORT'));
+      console.log(chalk.blue.bold('='.repeat(60)));
+      console.log(chalk.cyan(`🎯 Total products: ${chalk.bold(report.total)}`));
+      console.log(chalk.green(`✅ Successfully deleted: ${chalk.bold(report.deleted)}`));
+      console.log(chalk.red(`❌ Failed: ${chalk.bold(report.failed)}`));
+      console.log(chalk.gray(`⏭️  Skipped (Invalid ID): ${chalk.bold(report.skipped)}`));
+      console.log(chalk.gray(`📁 Report saved to: ${reportFilename}`));
+      console.log(chalk.blue.bold('='.repeat(60) + '\n'));
+
+      if (report.skipped > 0) {
+        console.log(chalk.yellow.bold('⚠️  Invalid Product IDs (must start with "PA"):'));
+        report.invalidIds.forEach((id, index) => {
+          console.log(chalk.yellow(`  ${index + 1}. ${id}`));
+        });
+        console.log('');
+      }
+
+      if (report.failed > 0) {
+        console.log(chalk.red.bold('❌ Errors encountered:'));
+        report.errors.forEach((err, index) => {
+          console.log(chalk.red(`  ${index + 1}. ${err.productId}: ${err.error} (Status: ${err.statusCode})`));
+        });
+        console.log('');
+      }
+
+      // Mover arquivo CSV para pasta processed
+      const moveSpinner = ora(chalk.blue('Moving CSV file to processed folder...')).start();
+      try {
+        const processedDir = this.ensureProcessedDirectory();
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+        const processedFileName = `${path.basename(actualFileName, path.extname(actualFileName))}_${timestamp}${path.extname(actualFileName)}`;
+        const processedPath = path.join(processedDir, processedFileName);
+
+        // Mover arquivo
+        fs.renameSync(csvPath, processedPath);
+
+        moveSpinner.succeed(chalk.green(`CSV file moved to: processed/${processedFileName}`));
+      } catch (moveError) {
+        moveSpinner.fail(chalk.red('Failed to move CSV file'));
+        console.error(chalk.gray(`  Error: ${moveError.message}`));
+      }
+
+      return report;
+
+    } catch (error) {
+      console.error(chalk.red('❌ Error deleting products:'), error.message);
       throw error;
     }
   }
@@ -1000,7 +1273,9 @@ program
   .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
   .option('--q <query>', 'Query string (e.g: not (childSKUs pr))')
   .option('--f <fields>', 'Fields to return (e.g: id,displayName,childSKUs.repositoryId)')
-  .option('--c', 'Consolidate results into a single file and delete originals')
+  .option('--c', 'Consolidate results into a single JSON/CSV file and delete originals')
+  .option('--id-list', 'Generate a simple CSV with only product IDs (one per line, no header)')
+  .option('--pa-only', 'Filter only product IDs starting with "PA" (use with --id-list)')
   .action(async (options) => {
     try {
       console.log(chalk.blue.bold('🚀 Product Fetcher v1.0.0\n'));
@@ -1010,9 +1285,40 @@ program
       }
 
       const fetcher = new ProfileFetcher(options.env);
-      await fetcher.searchProducts(options.q, options.f || '', options.c || false);
+      await fetcher.searchProducts(
+        options.q,
+        options.f || '',
+        options.c || false,
+        options.idList || false,
+        options.paOnly || false
+      );
 
       console.log(chalk.green.bold('🎉 Operation completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('deleteProducts')
+  .description('Delete products from a CSV file (auto-finds files starting with "products" in inputs/)')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .option('-n, --concurrency <number>', 'Number of parallel requests (1-10)', '1')
+  .argument('[csvFile]', 'Optional: CSV file name in inputs folder (default: auto-find products*.csv)')
+  .action(async (csvFile, options) => {
+    try {
+      console.log(chalk.blue.bold('🗑️  Product Deleter v1.0.0\n'));
+
+      const concurrency = parseInt(options.concurrency) || 1;
+      if (concurrency < 1 || concurrency > 10) {
+        throw new Error('Concurrency must be between 1 and 10');
+      }
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.deleteProducts(csvFile, concurrency);
+
+      console.log(chalk.green.bold('🎉 Deletion process completed!'));
     } catch (error) {
       console.error(chalk.red.bold('\n❌ Error:'), error.message);
       process.exit(1);

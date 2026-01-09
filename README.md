@@ -10,6 +10,7 @@ Node.js application to fetch profiles from Oracle Commerce Cloud API.
 - Support for different search fields (email, firstName, etc.)
 - **NEW**: Data mining from consolidated results with multiple filter types
 - Automatic CSV export for both search and mining results
+- **NEW**: Bulk product deletion with detailed reporting and progress tracking
 
 ## Installation
 
@@ -30,11 +31,12 @@ cp .env_example .env
 ```
 Edit `.env` file with your actual Oracle Commerce Cloud credentials.
 
-4. Make the script executable:
+4. Make the scripts executable:
 ```bash
 chmod +x index.js
 chmod +x *.sh
 chmod +x search_product
+chmod +x delete_product
 ```
 
 ## Environment Configuration
@@ -79,6 +81,15 @@ PROD_BEARER_TOKEN=your_actual_prod_token_here
 #### Search products with a custom query
 ```bash
 ./search_product --q="not (childSKUs pr)" --f=id,displayName,childSKUs.repositoryId --env=prod
+```
+
+#### Delete products from CSV file
+```bash
+# Auto-finds first file starting with "products" in assets/ folder
+./delete_product --env=prod
+
+# Or specify a specific file
+./delete_product products.csv --env=prod
 ```
 
 #### Test authentication
@@ -245,7 +256,7 @@ Use the `--c` flag to consolidate all response files into a single result file:
 
 **What happens with `--c`:**
 1. All individual response files are processed
-2. A single consolidated file is created in the `result/` folder
+2. A single consolidated file is created in the `output/` folder
 3. Original response files are deleted
 4. Consolidated file format:
 ```json
@@ -341,3 +352,113 @@ The application automatically:
 - Makes all calls with appropriate offset
 - Saves each response to a separate file
 - Displays progress in the console
+
+## Product Deletion
+
+### Delete Products from CSV
+
+The `delete_product` script allows you to bulk delete products from Oracle Commerce Cloud using a CSV file.
+
+#### Features:
+- **Auto-detection**: Automatically finds files starting with "products" in the `assets/` folder
+- **Progress tracking**: Beautiful spinners and progress indicators for each deletion
+- **Detailed reporting**: Comprehensive JSON report saved after completion
+- **Error handling**: Continues processing even if individual products fail
+- **Smart status**: Different colored messages for success, warnings (404), and errors
+- **File archiving**: Automatically moves processed CSV files to `assets/processed/` folder with timestamp
+
+#### Usage:
+
+**Auto-find mode (recommended):**
+```bash
+./delete_product --env=prod
+```
+This will automatically find and use the first file starting with "products" in the `assets/` folder.
+
+**Specific file mode:**
+```bash
+./delete_product products.csv --env=prod
+./delete_product my-products-list.csv --env=dev
+```
+
+**Using node directly:**
+```bash
+node index.js deleteProducts --env=prod
+node index.js deleteProducts products.csv --env=prod
+```
+
+#### CSV File Format:
+
+The CSV file should contain one product ID per line:
+```
+PA0000110124
+PA0000110125
+PA0000140023
+PA0000140143
+```
+
+Place the file in the `assets/` folder.
+
+#### Output:
+
+**During execution:**
+- Real-time progress with spinners
+- Color-coded status messages:
+  - 🟢 Green: Successful deletion
+  - 🟡 Yellow: Product not found (404)
+  - 🔴 Red: Deletion failed (error)
+- Progress counter: `[1/100]`, `[2/100]`, etc.
+
+**Final report:**
+```
+============================================================
+📊 DELETION REPORT
+============================================================
+🎯 Total products: 100
+✅ Successfully deleted: 98
+❌ Failed: 2
+📁 Report saved to: delete_report_2026-01-07-14-30-45.json
+============================================================
+
+✅ CSV file moved to: assets/processed/products_2026-01-07-14-30-45.csv
+```
+
+**Report file** (saved in `output/` folder):
+```json
+{
+  "total": 100,
+  "deleted": 98,
+  "failed": 2,
+  "errors": [
+    {
+      "productId": "PA0000123",
+      "error": "Product not found",
+      "statusCode": 404
+    }
+  ],
+  "startTime": "2026-01-07T14:30:45.000Z",
+  "endTime": "2026-01-07T14:32:15.000Z",
+  "environment": "prod"
+}
+```
+
+#### API Endpoint Used:
+```
+DELETE https://{{admin}}/ccadmin/v1/products/{productId}
+```
+
+#### File Management:
+After successful processing, the CSV file is automatically:
+1. Moved to `assets/processed/` folder
+2. Renamed with timestamp: `products_YYYY-MM-DD-HH-MM-SS.csv`
+3. The `processed/` folder is created automatically if it doesn't exist
+4. Original file in `assets/` is removed
+
+This prevents accidentally re-processing the same file and maintains a clear history of processed deletions.
+
+#### Best Practices:
+1. Always test in `dev` or `tst` environment first
+2. Keep backup of your CSV file (processed files are archived in `assets/processed/`)
+3. Review the deletion report after completion
+4. Monitor for 404 errors (products already deleted or don't exist)
+5. Check `assets/processed/` folder for history of processed files

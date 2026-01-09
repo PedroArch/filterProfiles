@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# Product Deleter Wrapper Script
+# Usage:
+#   ./delete_product --env=prod                    (auto-finds products*.csv in assets/)
+#   ./delete_product products.csv --env=prod       (uses specific file)
+
+node index.js deleteProducts "$@"
