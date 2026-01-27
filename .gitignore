@@ -13,6 +13,9 @@ output/
 outputs/
 processed/
 
+# Input files
+inputs/
+
 # IDE files
 .vscode/
 .idea/

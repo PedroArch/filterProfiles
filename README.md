@@ -11,6 +11,7 @@ Node.js application to fetch profiles from Oracle Commerce Cloud API.
 - **NEW**: Data mining from consolidated results with multiple filter types
 - Automatic CSV export for both search and mining results
 - **NEW**: Bulk product deletion with detailed reporting and progress tracking
+- **NEW**: Order fetching by ID from CSV files with consolidated results
 
 ## Installation
 
@@ -85,11 +86,23 @@ PROD_BEARER_TOKEN=your_actual_prod_token_here
 
 #### Delete products from CSV file
 ```bash
-# Auto-finds first file starting with "products" in assets/ folder
+# Auto-finds first file starting with "products" in inputs/ folder
 ./delete_product --env=prod
 
 # Or specify a specific file
 ./delete_product products.csv --env=prod
+```
+
+#### Fetch orders by ID from CSV file
+```bash
+# Auto-finds first file starting with "orders" and ending with .csv in inputs/ folder
+node index.js searchOrders --env=prod
+
+# Or specify a specific file
+node index.js searchOrders orders_20260127_093906.csv --env=tst
+
+# Fetch only specific fields (id is always included)
+node index.js searchOrders --env=tst --f=id,profile.email,profile.login
 ```
 
 #### Test authentication
@@ -462,3 +475,162 @@ This prevents accidentally re-processing the same file and maintains a clear his
 3. Review the deletion report after completion
 4. Monitor for 404 errors (products already deleted or don't exist)
 5. Check `assets/processed/` folder for history of processed files
+
+## Order Fetching
+
+### Fetch Orders by ID from CSV
+
+The `searchOrders` command allows you to fetch order details from Oracle Commerce Cloud using order IDs from a CSV file.
+
+#### Features:
+- **Auto-detection**: Automatically finds CSV files starting with "orders" in the `inputs/` folder
+- **Progress tracking**: Real-time progress indicators for each order fetch
+- **Consolidated output**: All orders saved in a single JSON file with metadata
+- **CSV export**: Automatic CSV generation for easy data analysis
+- **Detailed reporting**: Comprehensive JSON report with success/failure statistics
+- **Error handling**: Continues processing even if individual orders fail (404s, errors)
+- **Smart status**: Color-coded messages for success, warnings, and errors
+
+#### Usage:
+
+**Auto-find mode (recommended):**
+```bash
+node index.js searchOrders --env=prod
+```
+This will automatically find and use the first CSV file starting with "orders" in the `inputs/` folder.
+
+**Specific file mode:**
+```bash
+node index.js searchOrders orders_20260127_093906.csv --env=prod
+node index.js searchOrders my-order-list.csv --env=dev
+```
+
+**Using different environments:**
+```bash
+node index.js searchOrders --env=dev
+node index.js searchOrders --env=tst
+node index.js searchOrders --env=prod
+```
+
+**Selecting specific fields:**
+```bash
+# Fetch only specific fields from each order
+node index.js searchOrders --env=tst --f=id,profile.email,profile.login
+
+# More field examples
+node index.js searchOrders --env=prod --f=id,state,submittedDate,profile.email
+node index.js searchOrders --env=dev --f=id,priceInfo.total,profile.firstName,profile.lastName
+```
+
+The `id` field is always included in the response by default. You can specify any valid order fields such as:
+- `profile.email`, `profile.login`, `profile.firstName`
+- `state`, `submittedDate`, `orderId`
+- `priceInfo.total`, `priceInfo.shipping`
+- And any other order object fields
+
+#### CSV File Format:
+
+The CSV file should contain one order ID per line, with optional header:
+```csv
+orderId
+so2750028
+so2750020
+so2740536
+```
+
+Or without header:
+```
+so2750028
+so2750020
+so2740536
+```
+
+Place the file in the `inputs/` folder (the script automatically skips the header if present).
+
+#### Output:
+
+**During execution:**
+- Real-time progress with spinners
+- Color-coded status messages:
+  - 🟢 Green: Successful fetch
+  - 🟡 Yellow: Order not found (404)
+  - 🔴 Red: Fetch failed (error)
+- Progress counter: `[1/422]`, `[2/422]`, etc.
+
+**Final report:**
+```
+============================================================
+📊 ORDERS FETCH REPORT
+============================================================
+🎯 Total orders: 422
+✅ Successfully fetched: 420
+❌ Failed: 2
+📁 Orders data saved to: orders_2026-01-27-09-45-30.json
+📁 CSV saved to: orders_2026-01-27-09-45-30.csv
+📁 Report saved to: orders_report_2026-01-27-09-45-30.json
+============================================================
+```
+
+**Output files** (saved in `outputs/` folder):
+
+1. **Consolidated orders JSON:**
+```json
+{
+  "total": 420,
+  "env": "prod",
+  "items": [
+    {
+      "orderId": "so2750028",
+      "state": "PENDING_PAYMENT",
+      "submittedDate": "2026-01-22T16:48:45.000Z",
+      // ... complete order data
+    }
+  ]
+}
+```
+
+2. **Orders CSV:** All order data in spreadsheet format with all fields as columns
+
+3. **Report JSON:**
+```json
+{
+  "total": 422,
+  "fetched": 420,
+  "failed": 2,
+  "errors": [
+    {
+      "orderId": "so123456",
+      "error": "Order not found",
+      "statusCode": 404
+    }
+  ],
+  "startTime": "2026-01-27T09:45:30.000Z",
+  "endTime": "2026-01-27T09:48:15.000Z",
+  "environment": "prod"
+}
+```
+
+#### API Endpoint Used:
+```
+GET https://{{admin}}/ccadmin/v1/orders/{orderId}
+```
+
+#### Creating Order ID CSV Files:
+
+You can extract order IDs from order history JSON files:
+
+**From orders.json to CSV:**
+```bash
+# Extract all orderIds and create CSV
+grep -oP '"orderId":\s*"\K[^"]+' inputs/orders.json > inputs/orders_$(date +%Y%m%d_%H%M%S).csv
+```
+
+Or use the built-in extraction as demonstrated in the examples above.
+
+#### Best Practices:
+1. Always test in `dev` or `tst` environment first
+2. Keep your source CSV files in the `inputs/` folder
+3. Review the fetch report after completion
+4. Monitor for 404 errors (orders that don't exist or were deleted)
+5. Use the generated CSV for easy analysis in spreadsheet software
+6. Check the consolidated JSON for complete order data with proper structure

@@ -29,7 +29,8 @@ const config = {
   endpoints: {
     login: '/ccadmin/v1/login',
     profiles: '/ccadmin/v1/profiles',
-    products: '/ccadmin/v1/products'
+    products: '/ccadmin/v1/products',
+    orders: '/ccadmin/v1/orders'
   },
   limits: {
     profilesPerRequest: parseInt(process.env.PROFILES_LIMIT) || 250
@@ -1181,6 +1182,170 @@ class ProfileFetcher {
       throw error;
     }
   }
+
+  async searchOrders(csvFile = null, fields = '') {
+    await this.ensureValidToken();
+
+    try {
+      const inputsDir = path.join(__dirname, 'inputs');
+      let csvPath;
+      let actualFileName;
+
+      // Se não foi fornecido um arquivo específico, procurar por arquivo começando com "orders" e que seja CSV
+      if (!csvFile) {
+        const files = fs.readdirSync(inputsDir);
+        const orderFiles = files.filter(file =>
+          file.toLowerCase().startsWith('orders') &&
+          file.endsWith('.csv')
+        );
+
+        if (orderFiles.length === 0) {
+          throw new Error('No CSV file starting with "orders" found in inputs/ folder');
+        }
+
+        if (orderFiles.length > 1) {
+          console.log(chalk.yellow(`⚠️  Multiple order files found:`));
+          orderFiles.forEach((file, index) => {
+            console.log(chalk.gray(`  ${index + 1}. ${file}`));
+          });
+          console.log(chalk.cyan(`Using: ${chalk.bold(orderFiles[0])}\n`));
+        }
+
+        actualFileName = orderFiles[0];
+        csvPath = path.join(inputsDir, actualFileName);
+      } else {
+        actualFileName = csvFile;
+        csvPath = path.join(inputsDir, csvFile);
+
+        if (!fs.existsSync(csvPath)) {
+          throw new Error(`CSV file not found: ${csvPath}`);
+        }
+      }
+
+      console.log(chalk.cyan(`🔍 Fetching orders from ${chalk.bold(actualFileName)}...`));
+      if (fields) {
+        console.log(chalk.gray(`📋 Selected fields: ${fields}\n`));
+      }
+
+      const csvContent = fs.readFileSync(csvPath, 'utf8');
+      const lines = csvContent.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+
+      // Skip header if it exists (check if first line is "orderId" or similar)
+      const orderIds = lines[0].toLowerCase() === 'orderid' ? lines.slice(1) : lines;
+
+      console.log(chalk.magenta(`📊 Total orders to fetch: ${chalk.bold(orderIds.length)}\n`));
+
+      const orders = [];
+      const report = {
+        total: orderIds.length,
+        fetched: 0,
+        failed: 0,
+        errors: [],
+        startTime: new Date().toISOString(),
+        environment: this.environment
+      };
+
+      for (let i = 0; i < orderIds.length; i++) {
+        const orderId = orderIds[i];
+        await this.ensureValidToken();
+
+        const spinner = ora(
+          chalk.blue(`[${i + 1}/${orderIds.length}] Fetching order ${chalk.bold(orderId)}...`)
+        ).start();
+
+        try {
+          const url = `${this.config.baseUrl}${config.endpoints.orders}/${orderId}`;
+
+          const params = {};
+
+          // Add fields parameter if provided
+          if (fields) {
+            params.fields = fields;
+          }
+
+          const response = await axios.get(url, {
+            params,
+            headers: {
+              'Authorization': `Bearer ${this.accessToken}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          orders.push(response.data);
+          report.fetched++;
+          spinner.succeed(chalk.green(`[${i + 1}/${orderIds.length}] Order ${chalk.bold(orderId)} fetched successfully`));
+
+        } catch (error) {
+          report.failed++;
+          const errorMsg = error.response?.data?.message || error.message;
+          const errorDetail = {
+            orderId,
+            error: errorMsg,
+            statusCode: error.response?.status
+          };
+          report.errors.push(errorDetail);
+
+          if (error.response?.status === 404) {
+            spinner.warn(chalk.yellow(`[${i + 1}/${orderIds.length}] Order ${chalk.bold(orderId)} not found (404)`));
+          } else {
+            spinner.fail(chalk.red(`[${i + 1}/${orderIds.length}] Failed to fetch ${chalk.bold(orderId)}: ${errorMsg}`));
+          }
+        }
+
+        // Pequena pausa entre requests
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      report.endTime = new Date().toISOString();
+
+      // Criar arquivo de resultado consolidado
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+      const outputFilename = this.generateUniqueFilename(this.resultDir, `orders_${timestamp}`, 'json');
+      const outputPath = path.join(this.resultDir, outputFilename);
+
+      const result = {
+        total: orders.length,
+        env: this.environment,
+        items: orders
+      };
+
+      fs.writeFileSync(outputPath, JSON.stringify(result, null, 2));
+
+      // Gerar CSV
+      await this.generateCSV(result, outputFilename);
+
+      // Salvar relatório
+      const reportFilename = this.generateUniqueFilename(this.resultDir, `orders_report_${timestamp}`, 'json');
+      const reportPath = path.join(this.resultDir, reportFilename);
+      fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+
+      // Exibir resumo final
+      console.log(chalk.blue.bold('\n' + '='.repeat(60)));
+      console.log(chalk.blue.bold('📊 ORDERS FETCH REPORT'));
+      console.log(chalk.blue.bold('='.repeat(60)));
+      console.log(chalk.cyan(`🎯 Total orders: ${chalk.bold(report.total)}`));
+      console.log(chalk.green(`✅ Successfully fetched: ${chalk.bold(report.fetched)}`));
+      console.log(chalk.red(`❌ Failed: ${chalk.bold(report.failed)}`));
+      console.log(chalk.gray(`📁 Orders data saved to: ${outputFilename}`));
+      console.log(chalk.gray(`📁 CSV saved to: ${outputFilename.replace('.json', '.csv')}`));
+      console.log(chalk.gray(`📁 Report saved to: ${reportFilename}`));
+      console.log(chalk.blue.bold('='.repeat(60) + '\n'));
+
+      if (report.failed > 0) {
+        console.log(chalk.red.bold('❌ Errors encountered:'));
+        report.errors.forEach((err, index) => {
+          console.log(chalk.red(`  ${index + 1}. ${err.orderId}: ${err.error} (Status: ${err.statusCode})`));
+        });
+        console.log('');
+      }
+
+      return report;
+
+    } catch (error) {
+      console.error(chalk.red('❌ Error fetching orders:'), error.message);
+      throw error;
+    }
+  }
 }
 
 // Configurar CLI
@@ -1319,6 +1484,26 @@ program
       await fetcher.deleteProducts(csvFile, concurrency);
 
       console.log(chalk.green.bold('🎉 Deletion process completed!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('searchOrders')
+  .description('Fetch orders by ID from a CSV file (auto-finds files starting with "orders" in inputs/)')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .option('--f <fields>', 'Fields to return (e.g: id,profile.email,profile.login)')
+  .argument('[csvFile]', 'Optional: CSV file name in inputs folder (default: auto-find orders*.csv)')
+  .action(async (csvFile, options) => {
+    try {
+      console.log(chalk.blue.bold('🔍 Order Fetcher v1.0.0\n'));
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.searchOrders(csvFile, options.f || '');
+
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
     } catch (error) {
       console.error(chalk.red.bold('\n❌ Error:'), error.message);
       process.exit(1);
