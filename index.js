@@ -1346,6 +1346,52 @@ class ProfileFetcher {
       throw error;
     }
   }
+
+  async countOrders() {
+    await this.ensureValidToken();
+
+    const spinner = ora(chalk.blue('Fetching incomplete orders count...')).start();
+
+    try {
+      const url = `${this.config.baseUrl}${config.endpoints.orders}`;
+      const params = {
+        q: 'state eq "INCOMPLETE"',
+        queryFormat: 'SCIM',
+        useAdvancedQParser: 'true',
+        limit: 1
+      };
+
+      const response = await axios.get(url, {
+        params,
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const { total, totalResults } = response.data;
+      const count = total ?? totalResults;
+
+      spinner.succeed(chalk.green('Data retrieved successfully!'));
+
+      console.log('');
+      console.log(chalk.blue.bold('='.repeat(50)));
+      console.log(chalk.blue.bold('  INCOMPLETE ORDERS REPORT'));
+      console.log(chalk.blue.bold('='.repeat(50)));
+      console.log(chalk.cyan('  Environment : ') + chalk.bold(this.environment.toUpperCase()));
+      console.log(chalk.cyan('  Status      : ') + chalk.bold('INCOMPLETE'));
+      console.log(chalk.red('  Total Orders: ') + chalk.red.bold(count.toLocaleString('en-US')));
+      console.log(chalk.blue.bold('='.repeat(50)));
+      console.log('');
+
+      return count;
+
+    } catch (error) {
+      spinner.fail(chalk.red('Failed to fetch incomplete orders count'));
+      console.error(chalk.red('Details:'), error.response?.data || error.message);
+      throw error;
+    }
+  }
 }
 
 // Configurar CLI
@@ -1502,6 +1548,24 @@ program
 
       const fetcher = new ProfileFetcher(options.env);
       await fetcher.searchOrders(csvFile, options.f || '');
+
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('countOrders')
+  .description('Count the number of orders with INCOMPLETE status')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue.bold('📦 Order Counter v1.0.0\n'));
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.countOrders();
 
       console.log(chalk.green.bold('🎉 Operation completed successfully!'));
     } catch (error) {
