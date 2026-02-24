@@ -1347,6 +1347,251 @@ class ProfileFetcher {
     }
   }
 
+  async listIncompleteOrders() {
+    await this.ensureValidToken();
+
+    const formatDate = (ts, timezone) =>
+      new Date(ts).toLocaleString('pt-BR', {
+        timeZone: timezone,
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+      });
+
+    const url = `${this.config.baseUrl}${config.endpoints.orders}`;
+    const pageSize = 250;
+    const maxRetries = 5;
+    const retryDelays = [3000, 6000, 12000, 24000, 48000];
+
+    const progressFile = path.join(this.resultDir, 'incomplete_orders_progress.json');
+
+    // CSV é criado uma vez e recebe append a cada página
+    const csvTimestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const csvFilename = `incomplete_orders_${csvTimestamp}.csv`;
+    const csvPath = path.join(this.resultDir, csvFilename);
+
+    let offset = 0;
+    let total = null;
+    let fetched = 0;
+    let page = 1;
+    let csvReady = false; // controla se o header já foi escrito
+
+    // Retomar progresso salvo se existir
+    if (fs.existsSync(progressFile)) {
+      try {
+        const saved = JSON.parse(fs.readFileSync(progressFile, 'utf8'));
+        offset  = saved.offset  ?? 0;
+        total   = saved.total   ?? null;
+        fetched = saved.fetched ?? 0;
+        page    = saved.page    ?? 1;
+        // CSV parcial já existe do run anterior
+        const savedCsv = saved.csvPath;
+        if (savedCsv && fs.existsSync(savedCsv)) {
+          Object.assign(this, { _resumedCsvPath: savedCsv });
+          csvReady = true;
+        }
+        console.log('');
+        console.log(chalk.yellow(`⚡ Resuming from page ${page} (${fetched.toLocaleString('en-US')} orders already fetched)...`));
+      } catch {
+        console.log(chalk.gray('  Could not read progress file, starting fresh.'));
+      }
+    }
+
+    // Usa o CSV do run anterior se estiver retomando, senão usa o novo
+    const activeCsvPath = this._resumedCsvPath ?? csvPath;
+    delete this._resumedCsvPath;
+
+    const saveProgress = () => {
+      fs.writeFileSync(progressFile, JSON.stringify({ offset, total, fetched, page, csvPath: activeCsvPath }), 'utf8');
+    };
+
+    const appendToCsv = (items) => {
+      const rows = items.map(o => {
+        const br = o.creationTime ? formatDate(o.creationTime, 'America/Sao_Paulo') : 'N/A';
+        const ca = o.creationTime ? formatDate(o.creationTime, 'America/Winnipeg') : 'N/A';
+        return `${o.id ?? 'N/A'},"${br}","${ca}"`;
+      });
+      fs.appendFileSync(activeCsvPath, rows.join('\n') + '\n', 'utf8');
+    };
+
+    console.log('');
+
+    try {
+      // Escreve header do CSV só se não estiver retomando
+      if (!csvReady) {
+        fs.writeFileSync(activeCsvPath, 'Order ID,Created (BR - Brasília),Created (CA - Manitoba)\n', 'utf8');
+      }
+
+      while (true) {
+        await this.ensureValidToken();
+
+        const totalPages = total ? Math.ceil(total / pageSize) : '?';
+        const spinner = ora(chalk.blue(`Fetching page ${page} of ${totalPages}...`)).start();
+
+        let data = null;
+        let attempt = 0;
+
+        while (attempt <= maxRetries) {
+          try {
+            const response = await axios.get(url, {
+              params: {
+                q: 'state eq "INCOMPLETE"',
+                queryFormat: 'SCIM',
+                useAdvancedQParser: 'true',
+                sortBy: 'creationTime',
+                sortOrder: 'asc',
+                limit: pageSize,
+                offset
+              },
+              headers: {
+                'Authorization': `Bearer ${this.accessToken}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: 30000
+            });
+            data = response.data;
+            break;
+
+          } catch (err) {
+            attempt++;
+            if (attempt > maxRetries) {
+              spinner.fail(chalk.red(`Page ${page} failed after ${maxRetries} retries. Progress saved.`));
+              saveProgress();
+              console.log(chalk.yellow(`\n  Run the command again to resume from page ${page}.`));
+              console.log(chalk.gray(`  Progress file: ${progressFile}\n`));
+              throw err;
+            }
+            const delay = retryDelays[attempt - 1];
+            spinner.text = chalk.yellow(`Page ${page} — connection error, retry ${attempt}/${maxRetries} in ${delay / 1000}s...`);
+            await this.ensureValidToken();
+            await new Promise(r => setTimeout(r, delay));
+          }
+        }
+
+        // Extrai só id e creationTime — descarta o resto imediatamente
+        const raw = data.items || [];
+        const items = raw.map(o => ({ id: o.id, creationTime: o.creationTime }));
+
+        if (total === null) {
+          total = data.total ?? data.totalResults ?? 0;
+          spinner.succeed(chalk.green(`Page ${page} fetched — Total INCOMPLETE orders: ${total}`));
+        } else {
+          spinner.succeed(chalk.green(`Page ${page} of ${Math.ceil(total / pageSize)} fetched (${fetched + items.length}/${total})`));
+        }
+
+        // Append direto no CSV e libera a memória
+        appendToCsv(items);
+        fetched += items.length;
+        saveProgress();
+
+        if (fetched >= total || items.length < pageSize) break;
+
+        offset += pageSize;
+        page++;
+      }
+
+      // Busca completa — remover arquivo de progresso
+      if (fs.existsSync(progressFile)) fs.unlinkSync(progressFile);
+
+      if (fetched === 0) {
+        console.log(chalk.yellow('  No INCOMPLETE orders found.'));
+        console.log('');
+        return 0;
+      }
+
+      console.log('');
+      console.log(chalk.blue.bold('='.repeat(72)));
+      console.log(chalk.blue.bold(`  INCOMPLETE ORDERS — ${this.environment.toUpperCase()} (oldest → newest)`));
+      console.log(chalk.blue.bold('='.repeat(72)));
+      console.log(chalk.cyan(`  Total : `) + chalk.bold(fetched.toLocaleString('en-US') + ' orders'));
+      console.log(chalk.cyan(`  CSV   : `) + chalk.bold(activeCsvPath));
+      console.log(chalk.blue.bold('='.repeat(72)));
+      console.log('');
+
+      return fetched;
+
+    } catch (error) {
+      console.error(chalk.red('\nFailed to list incomplete orders'));
+      console.error(chalk.red('Details:'), error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async oldestIncompleteOrder() {
+    await this.ensureValidToken();
+
+    const spinner = ora(chalk.blue('Fetching oldest INCOMPLETE order...')).start();
+
+    try {
+      const url = `${this.config.baseUrl}${config.endpoints.orders}`;
+      const params = {
+        q: 'state eq "INCOMPLETE"',
+        queryFormat: 'SCIM',
+        useAdvancedQParser: 'true',
+        sortBy: 'creationTime',
+        sortOrder: 'asc',
+        limit: 1
+      };
+
+      const response = await axios.get(url, {
+        params,
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const items = response.data.items || [];
+
+      if (items.length === 0) {
+        spinner.succeed(chalk.green('Query completed.'));
+        console.log('');
+        console.log(chalk.yellow('  No INCOMPLETE orders found.'));
+        console.log('');
+        return null;
+      }
+
+      const order = items[0];
+      spinner.succeed(chalk.green('Oldest INCOMPLETE order retrieved!'));
+
+      const formatDate = (ts, timezone) =>
+        new Date(ts).toLocaleString('pt-BR', {
+          timeZone: timezone,
+          day: '2-digit', month: '2-digit', year: 'numeric',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hour12: false
+        });
+
+      const createdBR = order.creationTime ? formatDate(order.creationTime, 'America/Sao_Paulo') : 'N/A';
+      const createdCA = order.creationTime ? formatDate(order.creationTime, 'America/Winnipeg') : 'N/A';
+
+      const email =
+        order.profile?.email ??
+        order.shippingGroups?.[0]?.shippingAddress?.email ??
+        'N/A';
+
+      console.log('');
+      console.log(chalk.blue.bold('='.repeat(50)));
+      console.log(chalk.blue.bold('  OLDEST INCOMPLETE ORDER'));
+      console.log(chalk.blue.bold('='.repeat(50)));
+      console.log(chalk.cyan('  Environment    : ') + chalk.bold(this.environment.toUpperCase()));
+      console.log(chalk.cyan('  Order ID       : ') + chalk.bold(order.id ?? 'N/A'));
+      console.log(chalk.cyan('  State          : ') + chalk.bold(order.state ?? 'N/A'));
+      console.log(chalk.cyan('  Created (BR)   : ') + chalk.bold(createdBR + ' (Brasília)'));
+      console.log(chalk.cyan('  Created (CA)   : ') + chalk.bold(createdCA + ' (Manitoba)'));
+      console.log(chalk.cyan('  Email          : ') + chalk.bold(email));
+      console.log(chalk.blue.bold('='.repeat(50)));
+      console.log('');
+
+      return order;
+
+    } catch (error) {
+      spinner.fail(chalk.red('Failed to fetch oldest incomplete order'));
+      console.error(chalk.red('Details:'), error.response?.data || error.message);
+      throw error;
+    }
+  }
+
   async countOrders() {
     await this.ensureValidToken();
 
@@ -1566,6 +1811,42 @@ program
 
       const fetcher = new ProfileFetcher(options.env);
       await fetcher.countOrders();
+
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('oldestOrder')
+  .description('Find the oldest order with INCOMPLETE status')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue.bold('🕰️  Oldest Incomplete Order Finder v1.0.0\n'));
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.oldestIncompleteOrder();
+
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('listOrders')
+  .description('List all INCOMPLETE orders from oldest to newest with BR and CA timestamps')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue.bold('📋 Incomplete Orders List v1.0.0\n'));
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.listIncompleteOrders();
 
       console.log(chalk.green.bold('🎉 Operation completed successfully!'));
     } catch (error) {
