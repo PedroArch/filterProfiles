@@ -30,7 +30,8 @@ const config = {
     login: '/ccadmin/v1/login',
     profiles: '/ccadmin/v1/profiles',
     products: '/ccadmin/v1/products',
-    orders: '/ccadmin/v1/orders'
+    orders: '/ccadmin/v1/orders',
+    skus: '/ccagent/v1/skus'
   },
   limits: {
     profilesPerRequest: parseInt(process.env.PROFILES_LIMIT) || 250
@@ -986,6 +987,379 @@ class ProfileFetcher {
     }
   }
 
+  async fetchPage(endpoint, params) {
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS = [3000, 5000, 10000];
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      await this.ensureValidToken();
+      try {
+        const response = await axios.get(`${this.config.baseUrl}${endpoint}`, {
+          params,
+          headers: { 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' }
+        });
+        return response.data;
+      } catch (reqError) {
+        if (attempt < MAX_RETRIES) {
+          const delay = RETRY_DELAYS[attempt - 1];
+          console.log(chalk.yellow(`    ⚠ Attempt ${attempt}/${MAX_RETRIES} failed. Retrying in ${delay / 1000}s...`));
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          throw reqError;
+        }
+      }
+    }
+  }
+
+  async listEntities(entityType, endpoint, query, fields, allPages = false, resumeFile = null) {
+    await this.ensureValidToken();
+
+    let allItems = [];
+    let totalItemsInOCC = 0;
+    let offset = 0;
+    let requestCount = 0;
+    let failedOffsets = [];
+
+    // Parse date filter from query for post-fetch filtering
+    const dateMatch = query.match(/(\w+)\s+lt\s+"([^"]+)"/);
+    const dateField = dateMatch ? dateMatch[1] : null;
+    const dateCutoff = dateMatch ? new Date(dateMatch[2]) : null;
+
+    console.log(chalk.cyan(`🔍 Listing ${entityType}...`));
+    console.log(chalk.gray(`📋 Selected fields: ${fields}`));
+    if (dateCutoff) {
+      console.log(chalk.gray(`📅 Date filter: ${dateField} < ${dateCutoff.toISOString()} (applied after fetch)\n`));
+    }
+
+    // Resume from partial file
+    if (resumeFile) {
+      const resumePath = path.join(this.resultDir, resumeFile);
+      if (!fs.existsSync(resumePath)) {
+        throw new Error(`Resume file not found: ${resumeFile}`);
+      }
+      const partialData = JSON.parse(fs.readFileSync(resumePath, 'utf8'));
+      allItems = partialData.items;
+      offset = partialData.lastOffset;
+      totalItemsInOCC = partialData.totalInOCC || 0;
+      failedOffsets = partialData.failedOffsets || [];
+      requestCount = Math.floor(offset / config.limits.profilesPerRequest);
+      console.log(chalk.yellow(`🔄 Resuming from partial file: ${resumeFile}`));
+      console.log(chalk.yellow(`   Loaded ${chalk.bold(allItems.length)} ${entityType} | Continuing from offset ${chalk.bold(offset)}`));
+      if (failedOffsets.length > 0) {
+        console.log(chalk.yellow(`   ${failedOffsets.length} failed offsets to retry: ${failedOffsets.join(', ')}`));
+      }
+      console.log('');
+    }
+
+    try {
+      // Main fetch loop
+      while (true) {
+        requestCount++;
+
+        const params = {
+          q: query,
+          queryFormat: 'SCIM',
+          useAdvancedQParser: true,
+          fields: fields,
+          offset: offset,
+          limit: config.limits.profilesPerRequest
+        };
+
+        const spinner = ora(chalk.blue(`Making request ${requestCount} (offset: ${offset})...`)).start();
+
+        try {
+          const data = await this.fetchPage(endpoint, params);
+
+          if (requestCount === 1 && totalItemsInOCC === 0) {
+            totalItemsInOCC = data.totalResults;
+            spinner.succeed(chalk.green(`Request ${requestCount} completed`));
+            console.log(chalk.magenta(`📊 Total ${entityType} in OCC: ${chalk.bold(totalItemsInOCC)}`));
+          } else {
+            spinner.succeed(chalk.green(`Request ${requestCount} completed (${data.items.length} items)`));
+          }
+
+          allItems.push(...data.items);
+
+          if (!allPages) {
+            console.log(chalk.yellow(`\n⚠️  Fetched first page only (${data.items.length}/${totalItemsInOCC}). Use --all to fetch all pages.\n`));
+            break;
+          }
+
+          if (offset + config.limits.profilesPerRequest >= totalItemsInOCC || data.items.length < config.limits.profilesPerRequest) {
+            break;
+          }
+        } catch (reqError) {
+          spinner.fail(chalk.red(`Request ${requestCount} failed (offset: ${offset}) - skipping`));
+          console.log(chalk.gray(`  Error: ${reqError.response?.data?.message || reqError.message}\n`));
+          failedOffsets.push(offset);
+
+          if (!allPages) break;
+
+          // Check if we should stop (offset beyond total)
+          if (totalItemsInOCC > 0 && offset + config.limits.profilesPerRequest >= totalItemsInOCC) {
+            break;
+          }
+        }
+
+        offset += config.limits.profilesPerRequest;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      // Retry failed offsets
+      if (failedOffsets.length > 0) {
+        console.log(chalk.yellow(`\n🔄 Retrying ${chalk.bold(failedOffsets.length)} failed offsets...\n`));
+        const stillFailed = [];
+
+        for (const failedOffset of failedOffsets) {
+          const params = {
+            fields: fields,
+            offset: failedOffset,
+            limit: config.limits.profilesPerRequest
+          };
+
+          const spinner = ora(chalk.blue(`Retrying offset ${failedOffset}...`)).start();
+
+          try {
+            const data = await this.fetchPage(endpoint, params);
+            spinner.succeed(chalk.green(`Offset ${failedOffset} recovered (${data.items.length} items)`));
+            allItems.push(...data.items);
+          } catch (reqError) {
+            spinner.fail(chalk.red(`Offset ${failedOffset} failed again`));
+            stillFailed.push(failedOffset);
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        failedOffsets = stillFailed;
+      }
+
+      // Apply date filter if present
+      if (dateCutoff && dateField) {
+        const beforeFilter = allItems.length;
+        allItems = allItems.filter(item => {
+          const itemDate = item[dateField];
+          if (!itemDate) return false;
+          return new Date(itemDate) < dateCutoff;
+        });
+        const filtered = beforeFilter - allItems.length;
+        if (filtered > 0) {
+          console.log(chalk.gray(`🔽 Filtered out ${filtered} ${entityType} with ${dateField} >= ${dateCutoff.toISOString()}`));
+        }
+      }
+
+      console.log(chalk.green.bold(`\n✅ Fetch completed!`));
+      console.log(chalk.cyan(`📈 Total ${entityType} after filter: ${chalk.bold(allItems.length)}`));
+      if (failedOffsets.length > 0) {
+        console.log(chalk.yellow(`⚠️  ${failedOffsets.length} offsets could not be recovered: ${failedOffsets.join(', ')}`));
+      }
+
+      // Generate timestamp for filenames
+      const now = new Date();
+      const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
+
+      const jsonFilename = failedOffsets.length > 0
+        ? `${entityType}_list_${timestamp}_partial.json`
+        : `${entityType}_list_${timestamp}.json`;
+
+      const jsonResult = {
+        total: allItems.length,
+        totalInOCC: totalItemsInOCC,
+        env: this.environment,
+        items: allItems
+      };
+
+      if (failedOffsets.length > 0) {
+        jsonResult.partial = true;
+        jsonResult.lastOffset = offset;
+        jsonResult.failedOffsets = failedOffsets;
+      }
+
+      const jsonFilepath = path.join(this.resultDir, jsonFilename);
+      fs.writeFileSync(jsonFilepath, JSON.stringify(jsonResult, null, 2));
+      console.log(chalk.cyan(`📄 JSON file: ${jsonFilename}`));
+
+      // Generate CSV
+      await this.generateCSV(jsonResult, jsonFilename);
+
+      console.log(chalk.cyan(`\n📁 Files saved in: outputs/`));
+
+      if (failedOffsets.length > 0) {
+        console.log(chalk.yellow(`\n⚠️  Use --resume ${jsonFilename} to retry the ${failedOffsets.length} missing offsets.`));
+      }
+
+    } catch (error) {
+      console.error(chalk.red(`\n❌ Unexpected error listing ${entityType}:`), error.message);
+
+      if (allItems.length > 0) {
+        console.log(chalk.yellow(`\n💾 Saving ${chalk.bold(allItems.length)} ${entityType} collected so far...`));
+
+        const now = new Date();
+        const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
+
+        const jsonFilename = `${entityType}_list_${timestamp}_partial.json`;
+        const jsonResult = {
+          total: allItems.length,
+          totalInOCC: totalItemsInOCC,
+          env: this.environment,
+          partial: true,
+          lastOffset: offset,
+          failedOffsets: failedOffsets,
+          items: allItems
+        };
+        const jsonFilepath = path.join(this.resultDir, jsonFilename);
+        fs.writeFileSync(jsonFilepath, JSON.stringify(jsonResult, null, 2));
+        console.log(chalk.cyan(`📄 Partial JSON saved: ${jsonFilename}`));
+
+        await this.generateCSV(jsonResult, jsonFilename);
+        console.log(chalk.cyan(`📁 Files saved in: outputs/`));
+      }
+
+      throw error;
+    }
+  }
+
+  async retryFailed(endpoint, partialFile, query = null) {
+    await this.ensureValidToken();
+
+    const MAX_RETRIES = 5;
+    const RETRY_DELAYS = [3000, 5000, 10000, 15000, 20000];
+
+    const filePath = path.join(this.resultDir, partialFile);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${partialFile}`);
+    }
+
+    const partialData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const failedOffsets = partialData.failedOffsets || [];
+
+    if (failedOffsets.length === 0) {
+      console.log(chalk.green('No failed offsets to retry!'));
+      return;
+    }
+
+    // Parse date filter from query for post-fetch filtering
+    const dateMatch = query ? query.match(/(\w+)\s+lt\s+"([^"]+)"/) : null;
+    const dateField = dateMatch ? dateMatch[1] : null;
+    const dateCutoff = dateMatch ? new Date(dateMatch[2]) : null;
+
+    let allItems = partialData.items;
+    const fields = Object.keys(allItems[0] || {}).join(',');
+    const totalInOCC = partialData.totalInOCC;
+
+    console.log(chalk.cyan(`🔄 Retrying ${chalk.bold(failedOffsets.length)} failed offsets from ${partialFile}`));
+    console.log(chalk.gray(`   Offsets: ${failedOffsets.join(', ')}`));
+    console.log(chalk.gray(`   Currently have ${allItems.length}/${totalInOCC} items\n`));
+
+    const stillFailed = [];
+    let recovered = 0;
+
+    for (const failedOffset of failedOffsets) {
+      let success = false;
+
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        await this.ensureValidToken();
+
+        const spinner = ora(chalk.blue(`Offset ${failedOffset} (attempt ${attempt}/${MAX_RETRIES})...`)).start();
+
+        try {
+          const params = {
+            q: query,
+            queryFormat: 'SCIM',
+            useAdvancedQParser: true,
+            fields: fields,
+            offset: failedOffset,
+            limit: config.limits.profilesPerRequest
+          };
+
+          const response = await axios.get(`${this.config.baseUrl}${endpoint}`, {
+            params,
+            headers: { 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' }
+          });
+
+          spinner.succeed(chalk.green(`Offset ${failedOffset} recovered (${response.data.items.length} items)`));
+          allItems.push(...response.data.items);
+          recovered++;
+          success = true;
+          break;
+        } catch (reqError) {
+          if (attempt < MAX_RETRIES) {
+            const delay = RETRY_DELAYS[attempt - 1];
+            spinner.warn(chalk.yellow(`Offset ${failedOffset} failed (attempt ${attempt}/${MAX_RETRIES}). Retrying in ${delay / 1000}s...`));
+            await new Promise(resolve => setTimeout(resolve, delay));
+          } else {
+            spinner.fail(chalk.red(`Offset ${failedOffset} failed after ${MAX_RETRIES} attempts`));
+          }
+        }
+      }
+
+      if (!success) {
+        stillFailed.push(failedOffset);
+      }
+
+      // Delay between offsets
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    // Apply date filter if present
+    if (dateCutoff && dateField) {
+      const beforeFilter = allItems.length;
+      allItems = allItems.filter(item => {
+        const itemDate = item[dateField];
+        if (!itemDate) return false;
+        return new Date(itemDate) < dateCutoff;
+      });
+      const filtered = beforeFilter - allItems.length;
+      if (filtered > 0) {
+        console.log(chalk.gray(`\n🔽 Filtered out ${filtered} items with ${dateField} >= ${dateCutoff.toISOString()}`));
+      }
+    }
+
+    console.log(chalk.green(`\n✅ Retry completed! Recovered ${chalk.bold(recovered)}/${failedOffsets.length} offsets`));
+    console.log(chalk.cyan(`📈 Total items: ${chalk.bold(allItems.length)}`));
+
+    // Save result
+    const now = new Date();
+    const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
+
+    const entityType = partialFile.split('_list_')[0];
+    const jsonFilename = stillFailed.length > 0
+      ? `${entityType}_list_${timestamp}_partial.json`
+      : `${entityType}_list_${timestamp}.json`;
+
+    const jsonResult = {
+      total: allItems.length,
+      totalInOCC: totalInOCC,
+      env: this.environment,
+      items: allItems
+    };
+
+    if (stillFailed.length > 0) {
+      jsonResult.partial = true;
+      jsonResult.failedOffsets = stillFailed;
+    }
+
+    const jsonFilepath = path.join(this.resultDir, jsonFilename);
+    fs.writeFileSync(jsonFilepath, JSON.stringify(jsonResult, null, 2));
+    console.log(chalk.cyan(`📄 JSON file: ${jsonFilename}`));
+
+    await this.generateCSV(jsonResult, jsonFilename);
+    console.log(chalk.cyan(`\n📁 Files saved in: outputs/`));
+
+    if (stillFailed.length > 0) {
+      console.log(chalk.yellow(`\n⚠️  ${stillFailed.length} offsets still failed: ${stillFailed.join(', ')}`));
+      console.log(chalk.yellow(`   Run again: node index.js retryFailed --env dev --file ${jsonFilename}`));
+    }
+  }
+
+  async listProducts(query, fields = 'id,creationDate', allPages = false, resumeFile = null) {
+    return this.listEntities('products', config.endpoints.products, query, fields, allPages, resumeFile);
+  }
+
+  async listSkus(query, fields = 'id,displayName,creationDate,active', allPages = false, resumeFile = null) {
+    return this.listEntities('skus', config.endpoints.skus, query, fields, allPages, resumeFile);
+  }
+
   ensureProcessedDirectory() {
     const processedDir = path.join(__dirname, 'processed');
     if (!fs.existsSync(processedDir)) {
@@ -1748,6 +2122,100 @@ program
         options.idList || false,
         options.paOnly || false
       );
+
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('listProducts')
+  .description('List products using SCIM query (e.g. products created before a date) and export to JSON/CSV')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .option('--q <query>', 'SCIM query string (e.g: creationDate lt "2026-01-01T00:00:00.000Z")')
+  .option('--f <fields>', 'Fields to return (default: id,creationDate)', 'id,creationDate')
+  .option('--all', 'Fetch all pages (default: first page only)')
+  .option('--resume <file>', 'Resume from a partial JSON file (e.g: products_list_2026-02-26_partial.json)')
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue.bold('📋 Product Lister v1.0.0\n'));
+
+      if (!options.q) {
+        throw new Error('Query parameter --q is required (e.g: --q \'creationDate lt "2026-01-01T00:00:00.000Z"\')');
+      }
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.listProducts(
+        options.q,
+        options.f || 'id,creationDate',
+        options.resume ? true : (options.all || false),
+        options.resume || null
+      );
+
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('listSkus')
+  .description('List SKUs using SCIM query (e.g. SKUs created before a date) and export to JSON/CSV')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .option('--q <query>', 'SCIM query string (e.g: creationDate lt "2026-01-01T00:00:00.000Z")')
+  .option('--f <fields>', 'Fields to return (default: id,displayName,creationDate,active)', 'id,displayName,creationDate,active')
+  .option('--all', 'Fetch all pages (default: first page only)')
+  .option('--resume <file>', 'Resume from a partial JSON file (e.g: skus_list_2026-02-26_partial.json)')
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue.bold('📋 SKU Lister v1.0.0\n'));
+
+      if (!options.q) {
+        throw new Error('Query parameter --q is required (e.g: --q \'creationDate lt "2026-01-01T00:00:00.000Z"\')');
+      }
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.listSkus(
+        options.q,
+        options.f || 'id,displayName,creationDate,active',
+        options.resume ? true : (options.all || false),
+        options.resume || null
+      );
+
+      console.log(chalk.green.bold('🎉 Operation completed successfully!'));
+    } catch (error) {
+      console.error(chalk.red.bold('\n❌ Error:'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('retryFailed')
+  .description('Retry failed offsets from a partial JSON file')
+  .option('--env <environment>', 'Environment (dev, tst, prod)', 'dev')
+  .option('--file <partialFile>', 'Partial JSON file with failedOffsets (in outputs/)')
+  .option('--q <query>', 'Original query for date filtering (e.g: creationDate lt "2026-01-01T00:00:00.000Z")')
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue.bold('🔄 Retry Failed Offsets v1.0.0\n'));
+
+      if (!options.file) {
+        throw new Error('--file is required (e.g: --file skus_list_2026-02-27_partial.json)');
+      }
+
+      if (!options.q) {
+        throw new Error('--q is required (e.g: --q \'creationDate lt "2026-01-01T00:00:00.000Z"\')');
+      }
+
+      // Detect endpoint from filename
+      const isSkus = options.file.startsWith('skus_');
+      const endpoint = isSkus ? config.endpoints.skus : config.endpoints.products;
+
+      const fetcher = new ProfileFetcher(options.env);
+      await fetcher.retryFailed(endpoint, options.file, options.q || null);
 
       console.log(chalk.green.bold('🎉 Operation completed successfully!'));
     } catch (error) {
